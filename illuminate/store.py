@@ -89,7 +89,8 @@ class Store:
                     self._db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {kind}")
             # A run left "running" means the app was closed mid-run.
             self._db.execute(
-                "UPDATE runs SET status = 'partial', note = 'interrupted' WHERE status = 'running'"
+                "UPDATE runs SET status = 'partial', note = 'interrupted',"
+                " finished_at = started_at WHERE status = 'running'"
             )
         # Changes whenever the job list changes; the page watches it to know when to reload.
         self.version = int(time.time() * 1000)

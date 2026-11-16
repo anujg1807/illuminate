@@ -471,3 +471,51 @@ def test_resume_api(scored):
         assert api.get("/api/status").json()["resume"]["done"] == 1
         api.delete("/api/resume")
         assert api.get("/api/status").json()["resume"] is None
+
+
+# ---- scheduling -----------------------------------------------------------
+
+
+def test_overdue_check_starts_after_the_computer_sleeps(world, monkeypatch):
+    """The wait follows the wall clock, so hours asleep do not delay the next check."""
+    clock, fake, store, service = world
+    monkeypatch.setattr("illuminate.service.WAKE_CHECK_SECONDS", 0.001)
+    service.next_run_at = clock.now + 15 * 60
+    waits = []
+    original = service._wake.wait
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 3:
+            clock.now += 8 * 3600  # the lid is closed for eight hours
+        return original(seconds)
+
+    service._wake.wait = wait
+    service.wait_for_next_run()
+    assert len(waits) == 3  # returned as soon as the clock showed the check was due
+
+
+def test_a_crashed_check_is_recorded_as_an_error(world):
+    clock, fake, store, service = world
+    service.run_cycle()
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    store.upsert = broken
+    fake.add("1", "Product Manager", age_seconds=60)
+    clock.now += 900
+    with pytest.raises(RuntimeError):
+        service.run_cycle()
+    last = store.last_run()
+    assert last["status"] == "error" and "disk full" in last["note"]
+    assert last["finished_at"] >= clock.now - 5
+
+
+def test_interrupted_check_gets_a_time(tmp_path):
+    path = tmp_path / "jobs.db"
+    store = Store(path)
+    store.start_run(1000.0, 3600)
+    store.close()
+    last = Store(path).last_run()
+    assert last["status"] == "partial" and last["finished_at"] == 1000.0

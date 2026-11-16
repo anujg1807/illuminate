@@ -378,7 +378,9 @@ function renderStatus() {
   } else if (run) {
     text = `Checked ${ago(now - run.finished_at)}`;
     if (run.scanned) text += ` · read ${run.scanned.toLocaleString()} postings`;
-    if (s.next_run_at) text += ` · next check ${until(s.next_run_at - now)}`;
+    if (s.next_run_at) {
+      text += s.next_run_at - now < -20 ? " · next check starting…" : ` · next check ${until(s.next_run_at - now)}`;
+    }
     if (run.status !== "ok") dot = "warn";
   } else {
     text = "Starting…"; dot = "busy";

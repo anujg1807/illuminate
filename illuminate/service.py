@@ -19,6 +19,11 @@ log = logging.getLogger("illuminate")
 # Each run searches back to the start of the last complete run, plus this much
 # overlap, so a job posted while a run was in progress is never missed.
 OVERLAP_SECONDS = 15 * 60
+# While waiting for the next check, look at the wall clock this often. A plain
+# timer does not count time the computer spends asleep (on a Mac, a wait of
+# 15 minutes can stretch to hours), so after the computer wakes the overdue
+# check starts within this many seconds instead.
+WAKE_CHECK_SECONDS = 10.0
 # The furthest back a catch-up run reaches after the app has been off for a while.
 MAX_CATCH_UP_SECONDS = 7 * 86400
 # The full scan reads every job posted in the location, so it only looks this
@@ -82,7 +87,14 @@ class Service:
             interval = self.config.interval_minutes * 60
             self.next_run_at = max(started + interval, time.time() + 5) + random.uniform(0, 20)
             self._wake.clear()
-            self._wake.wait(max(0.0, self.next_run_at - time.time()))
+            self.wait_for_next_run()
+
+    def wait_for_next_run(self) -> None:
+        """Wait until the next check is due by the wall clock, or one is asked for."""
+        while not self._stop.is_set() and self.next_run_at and time.time() < self.next_run_at:
+            remaining = self.next_run_at - time.time()
+            if self._wake.wait(max(0.0, min(WAKE_CHECK_SECONDS, remaining))):
+                return
 
     # ---- one run ----------------------------------------------------------
 
@@ -95,8 +107,18 @@ class Service:
     def run_cycle(self) -> dict:
         with self._run_lock:
             self.running = True
+            self._run_id = None
             try:
                 return self._run_cycle()
+            except Exception as error:
+                # Record the failure, so the page says so instead of showing
+                # the last good check as if nothing had happened.
+                if self._run_id is not None:
+                    self.store.finish_run(
+                        self._run_id, time.time(), "error",
+                        note=f"the check failed: {type(error).__name__}: {error}",
+                    )
+                raise
             finally:
                 self.running = False
                 self.phase = ""
@@ -105,7 +127,7 @@ class Service:
     def _run_cycle(self) -> dict:
         now = time.time()
         window = self.window_seconds(now)
-        run_id = self.store.start_run(now, window)
+        run_id = self._run_id = self.store.start_run(now, window)
         requests_before = self.client.requests_made
         found: set[str] = set()
         scanned: set[str] = set()
