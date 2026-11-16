@@ -1,0 +1,37 @@
+# Illuminate settings. Restart the app after changing this file.
+
+[search]
+# Where to look. "India" covers the whole country, remote roles included.
+location = "India"
+
+# Each phrase is searched separately on LinkedIn and the results are merged.
+# More phrases catch more indirectly-worded titles but cost more requests.
+queries = [
+    "product manager",
+    "product management",
+    "product owner",
+    "head of product",
+]
+
+# LinkedIn's keyword search skips some jobs whose title plainly says
+# "Product Manager". With full_scan on, every check also reads the title of
+# every job newly posted in the location and keeps the product roles, so
+# nothing depends on LinkedIn's keyword matching.
+full_scan = true
+
+[schedule]
+# How often to look for new jobs.
+interval_minutes = 15
+# How far back the very first run reaches.
+backfill_hours = 24
+
+[pacing]
+# Seconds to wait between requests to LinkedIn (a random value in this range).
+# Lower values are faster but get the app rate-limited sooner.
+min_delay_seconds = 3
+max_delay_seconds = 6
+# Extra requests per cycle spent pinning down exact posting times of older jobs.
+refine_requests_per_cycle = 30
+
+[server]
+port = 8000

@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Illuminate</title>
+<style>
+  :root {
+    --bg: #f7f6f3; --surface: #ffffff; --line: #e6e3dc; --text: #1c1b18; --muted: #6f6b62;
+    --accent: #b45309; --accent-soft: #fdf1dc; --link: #1d4ed8;
+    --match-bg: #e2f3e6; --match-fg: #17603a; --maybe-bg: #fcefd0; --maybe-fg: #7a4d05;
+    --no-bg: #ecebe7; --no-fg: #5f5b53; --flash: #fff4c7; --warn: #b45309; --ok: #1f8a4c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141412; --surface: #1d1c1a; --line: #32302c; --text: #eeece6; --muted: #a09b90;
+      --accent: #f0a646; --accent-soft: #3a2a10; --link: #8ab4ff;
+      --match-bg: #173524; --match-fg: #8fdcae; --maybe-bg: #3d2f0f; --maybe-fg: #f1c56a;
+      --no-bg: #2b2a27; --no-fg: #aaa59a; --flash: #4a3d12; --warn: #f0a646; --ok: #5fd08e;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 20px 64px; }
+  header { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between;
+    gap: 12px 24px; padding: 28px 0 18px; }
+  h1 { margin: 0; font-size: 26px; letter-spacing: -0.02em; }
+  h1 span { color: var(--accent); }
+  .sub { color: var(--muted); margin-top: 2px; }
+  .status { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 14px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--ok); flex: none; }
+  .dot.busy { background: var(--accent); animation: pulse 1.1s ease-in-out infinite; }
+  .dot.warn { background: var(--warn); }
+  @keyframes pulse { 50% { opacity: 0.3; } }
+  button { font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--text); padding: 7px 13px; }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { opacity: 0.55; cursor: default; }
+  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .chip { border-radius: 999px; padding: 5px 13px; font-size: 14px; color: var(--muted); }
+  .chip b { font-weight: 600; margin-left: 4px; }
+  .chip[aria-pressed="true"] { color: var(--text); border-color: var(--text); }
+  input[type="search"] { font: inherit; flex: 1 1 220px; min-width: 0; padding: 7px 12px;
+    border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+  .shown { color: var(--muted); font-size: 14px; white-space: nowrap; }
+  .notice { background: var(--accent-soft); border-radius: 8px; padding: 9px 13px; margin-bottom: 12px;
+    font-size: 14px; }
+  .card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--muted); padding: 11px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  tr.fresh td { animation: flash 6s ease-out; }
+  @keyframes flash { 0%, 40% { background: var(--flash); } 100% { background: transparent; } }
+  .when { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .when small, .place small { display: block; color: var(--muted); font-size: 13px; }
+  .approx { color: var(--muted); cursor: help; }
+  a.title { color: var(--link); text-decoration: none; font-weight: 600; }
+  a.title:hover { text-decoration: underline; }
+  a.title:visited { color: var(--muted); }
+  .new { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+    font-weight: 700; letter-spacing: 0.05em; background: var(--accent); color: #fff; vertical-align: 2px; }
+  .fit { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+    white-space: nowrap; cursor: help; }
+  .fit.match { background: var(--match-bg); color: var(--match-fg); }
+  .fit.maybe { background: var(--maybe-bg); color: var(--maybe-fg); }
+  .fit.no { background: var(--no-bg); color: var(--no-fg); }
+  .empty { padding: 48px 20px; text-align: center; color: var(--muted); }
+  .place small.only-narrow { display: none; }
+  @media (max-width: 720px) {
+    .wrap { padding: 0 16px 48px; }
+    .col-location, .col-fit { display: none; }
+    .place small.only-narrow { display: block; }
+    td, th { padding: 10px 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>Illumin<span>ate</span></h1>
+      <div class="sub" id="sub">Product Manager jobs on LinkedIn</div>
+    </div>
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <span id="statusText">Starting…</span>
+      <button id="refresh">Check now</button>
+    </div>
+  </header>
+
+  <div class="bar">
+    <button class="chip" data-label="match" aria-pressed="true">Product Manager<b id="n-match">0</b></button>
+    <button class="chip" data-label="maybe" aria-pressed="true">Possibly<b id="n-maybe">0</b></button>
+    <button class="chip" data-label="no" aria-pressed="false">Other roles<b id="n-no">0</b></button>
+    <input type="search" id="q" placeholder="Filter by title, company or location" autocomplete="off">
+    <span class="shown" id="shown"></span>
+  </div>
+
+  <div class="notice" id="notice" hidden></div>
+
+  <div class="card">
+    <table>
+      <thead>
+        <tr>
+          <th>Posted</th>
+          <th>Role</th>
+          <th>Company</th>
+          <th class="col-location">Location</th>
+          <th class="col-fit">Fit</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const FIT = { match: "Product Manager", maybe: "Possibly", no: "Other role" };
+
+// Remember what was on screen at the previous visit, to badge what is new since.
+function stored(key, fallback) {
+  try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); }
+  catch { return fallback; }
+}
+function store(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch {} }
+
+const openedAt = Date.now() / 1000;
+const lastVisit = stored("illuminate.lastVisit", openedAt);
+addEventListener("pagehide", () => store("illuminate.lastVisit", Date.now() / 1000));
+
+const state = {
+  jobs: [],
+  labels: new Set(stored("illuminate.labels", ["match", "maybe"])),
+  version: null,
+  status: null,
+  known: null,          // ids already shown, to flash the ones that arrive live
+  arrived: new Set(),
+  unseen: 0,
+};
+
+const timeFmt = new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" });
+const dayFmt = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" });
+const fullFmt = new Intl.DateTimeFormat(undefined, { dateStyle: "full", timeStyle: "long" });
+
+function ago(seconds) {
+  if (seconds < 60) return "just now";
+  const m = Math.floor(seconds / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} hr${h > 1 ? "s" : ""} ${m % 60 ? (m % 60) + " min " : ""}ago`;
+  const d = Math.floor(h / 24);
+  return `${d} day${d > 1 ? "s" : ""} ago`;
+}
+function until(seconds) {
+  if (seconds < 45) return "in under a minute";
+  const m = Math.round(seconds / 60);
+  return `in ${m} min`;
+}
+function span(seconds) {
+  if (seconds < 90) return "1 minute";
+  if (seconds < 5400) return `${Math.round(seconds / 60)} minutes`;
+  if (seconds < 36 * 3600) return `${Math.round(seconds / 3600)} hours`;
+  return `${Math.round(seconds / 86400)} days`;
+}
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") node.className = value; else node.setAttribute(key, value);
+  }
+  for (const child of children) node.append(child);
+  return node;
+}
+
+function whenCell(job) {
+  const date = new Date(job.posted_at * 1000);
+  const sameDay = date.toDateString() === new Date().toDateString();
+  const clock = (sameDay ? "" : dayFmt.format(date) + ", ") + timeFmt.format(date);
+  const cell = el("td", { class: "when" });
+  if (job.precise) {
+    cell.append(el("span", { title: fullFmt.format(date) }, clock));
+  } else {
+    cell.append(el("span", {
+      class: "approx",
+      title: `Approximate: posted within ${span(job.uncertainty)} of this time. ` +
+             "Illuminate narrows it down over the next few checks.",
+    }, "≈ " + clock));
+  }
+  cell.append(el("small", { "data-ago": job.posted_at }, ago(Date.now() / 1000 - job.posted_at)));
+  return cell;
+}
+
+function render() {
+  const q = $("q").value.trim().toLowerCase();
+  const visible = state.jobs.filter((job) =>
+    !q || `${job.title} ${job.company} ${job.location}`.toLowerCase().includes(q));
+  const rows = visible.map((job) => {
+    const title = el("a", { class: "title", href: job.url, target: "_blank", rel: "noopener" }, job.title);
+    const role = el("td", {}, title);
+    if (job.first_seen_at > lastVisit) role.append(el("span", { class: "new" }, "NEW"));
+    const company = el("td", { class: "place" }, job.company,
+      el("small", { class: "only-narrow" }, job.location));
+    const row = el("tr", {},
+      whenCell(job), role, company,
+      el("td", { class: "col-location" }, job.location),
+      el("td", { class: "col-fit" }, el("span", { class: "fit " + job.label, title: job.reason }, FIT[job.label])));
+    if (state.arrived.has(job.id)) row.classList.add("fresh");
+    return row;
+  });
+  $("rows").replaceChildren(...rows);
+  state.arrived.clear();
+
+  const total = state.jobs.length;
+  $("shown").textContent = q ? `${visible.length} of ${total} jobs` : `${total} job${total === 1 ? "" : "s"}`;
+  const empty = $("empty");
+  empty.hidden = visible.length > 0;
+  if (!visible.length) {
+    const firstRun = state.status && !state.status.last_run;
+    empty.textContent = firstRun
+      ? "First run in progress. It reaches back over the last day and takes a few minutes; jobs appear here as they are found."
+      : q ? "No jobs match that filter." : "No jobs to show for the selected categories yet.";
+  }
+}
+
+function renderStatus() {
+  const s = state.status;
+  if (!s) return;
+  const now = Date.now() / 1000;
+  const run = s.last_run;
+  let text, dot = "";
+  if (s.running) {
+    text = s.phase || "Checking LinkedIn…"; dot = "busy";
+  } else if (run) {
+    text = `Checked ${ago(now - run.finished_at)}`;
+    if (run.scanned) text += ` · read ${run.scanned.toLocaleString()} postings`;
+    if (s.next_run_at) text += ` · next check ${until(s.next_run_at - now)}`;
+    if (run.status !== "ok") dot = "warn";
+  } else {
+    text = "Starting…"; dot = "busy";
+  }
+  $("statusText").textContent = text;
+  $("dot").className = "dot " + dot;
+  $("refresh").disabled = s.running;
+  $("sub").textContent = `Product Manager jobs on LinkedIn · ${s.location} · checked every ${s.interval_minutes} minutes`;
+  for (const label of ["match", "maybe", "no"]) $("n-" + label).textContent = s.counts[label];
+
+  const notice = $("notice");
+  if (!s.running && run && run.status !== "ok") {
+    notice.hidden = false;
+    notice.textContent = "The last check was incomplete (" + (run.note || "interrupted") +
+      "). Nothing is lost: the next check searches back far enough to cover the gap.";
+  } else if (run && run.note) {
+    notice.hidden = false; notice.textContent = run.note;
+  } else {
+    notice.hidden = true;
+  }
+}
+
+async function loadJobs() {
+  const labels = [...state.labels].join(",");
+  const data = await (await fetch("/api/jobs?labels=" + labels)).json();
+  if (state.known) {
+    for (const job of data.jobs) {
+      if (!state.known.has(job.id) && job.first_seen_at > openedAt) {
+        state.arrived.add(job.id);
+        if (document.hidden) state.unseen += 1;
+      }
+    }
+  }
+  state.known = new Set([...(state.known || []), ...data.jobs.map((job) => job.id)]);
+  state.jobs = data.jobs;
+  state.version = data.version;
+  document.title = (state.unseen ? `(${state.unseen}) ` : "") + "Illuminate";
+  render();
+}
+
+// The page keeps itself current: it asks the app every few seconds whether
+// anything changed and reloads the table when it has. No manual refresh needed.
+async function poll() {
+  try {
+    state.status = await (await fetch("/api/status")).json();
+    renderStatus();
+    if (state.status.version !== state.version) await loadJobs();
+  } catch {
+    $("statusText").textContent = "Illuminate is not running. Start it again to resume checks.";
+    $("dot").className = "dot warn";
+  }
+}
+
+for (const chip of document.querySelectorAll(".chip")) {
+  chip.setAttribute("aria-pressed", state.labels.has(chip.dataset.label));
+  chip.addEventListener("click", () => {
+    const label = chip.dataset.label;
+    state.labels.has(label) ? state.labels.delete(label) : state.labels.add(label);
+    chip.setAttribute("aria-pressed", state.labels.has(label));
+    store("illuminate.labels", [...state.labels]);
+    state.known = null;
+    loadJobs();
+  });
+}
+$("q").addEventListener("input", render);
+$("refresh").addEventListener("click", async () => {
+  $("refresh").disabled = true;
+  await fetch("/api/refresh", { method: "POST" });
+  setTimeout(poll, 600);
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { state.unseen = 0; document.title = "Illuminate"; }
+});
+
+poll();
+setInterval(poll, 5000);
+setInterval(() => {
+  const now = Date.now() / 1000;
+  for (const node of document.querySelectorAll("[data-ago]")) node.textContent = ago(now - Number(node.dataset.ago));
+  renderStatus();
+}, 20000);
+</script>
+</body>
+</html>
