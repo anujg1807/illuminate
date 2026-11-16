@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+from pathlib import Path
 import threading
 import webbrowser
 
@@ -16,6 +18,17 @@ from .store import Store
 from .web import create_app
 
 
+def load_env_file(path: Path) -> None:
+    """Read KEY=value lines from .env (where the Anthropic API key is kept, out of git)."""
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="illuminate", description=__doc__)
     parser.add_argument("--config", default="config.toml", help="settings file (default: config.toml)")
@@ -23,6 +36,7 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true", help="do not open the page automatically")
     args = parser.parse_args()
 
+    load_env_file(Path(args.config).parent / ".env")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(message)s", datefmt="%H:%M:%S")
     config = config_module.load(args.config)
     port = args.port or config.port

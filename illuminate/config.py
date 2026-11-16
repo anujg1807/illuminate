@@ -25,6 +25,7 @@ class Config:
     max_delay_seconds: float = 6
     refine_requests_per_cycle: int = 30
     port: int = 8000
+    scoring_model: str = "claude-opus-5-5"
     database: Path = Path("data/illuminate.db")
 
 
@@ -52,6 +53,7 @@ def load(path: Path | str = "config.toml") -> Config:
         "refine_requests_per_cycle", config.refine_requests_per_cycle
     )
     config.port = server.get("port", config.port)
+    config.scoring_model = data.get("scoring", {}).get("model", config.scoring_model)
     config.database = path.parent / data.get("database", str(config.database))
     if not config.queries and not config.full_scan:
         raise ValueError("config.toml: [search] needs at least one query, or full_scan = true")

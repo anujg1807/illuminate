@@ -10,7 +10,8 @@ import time
 from . import timing
 from .classifier import NO, classify
 from .config import Config
-from .linkedin import LinkedInClient, LinkedInError
+from . import scoring
+from .linkedin import LinkedInClient, LinkedInError, RateLimited
 from .store import Store
 
 log = logging.getLogger("illuminate")
@@ -26,7 +27,9 @@ FULL_SCAN_MAX_SECONDS = 3600
 
 
 class Service:
-    def __init__(self, config: Config, store: Store, client: LinkedInClient | None = None) -> None:
+    def __init__(
+        self, config: Config, store: Store, client: LinkedInClient | None = None, scorer=None
+    ) -> None:
         self.config = config
         self.store = store
         self._stop = threading.Event()
@@ -38,6 +41,10 @@ class Service:
             stop=self._stop,
         )
         self._thread: threading.Thread | None = None
+        self.scorer = scorer or scoring.Scorer(config.scoring_model)
+        self._score_wake = threading.Event()
+        self._score_thread: threading.Thread | None = None
+        self.scoring_note = ""  # why scoring is paused, if it is
         self.running = False
         self.phase = ""
         self.next_run_at: float | None = None
@@ -48,10 +55,15 @@ class Service:
         if self._thread is None:
             self._thread = threading.Thread(target=self._loop, name="illuminate", daemon=True)
             self._thread.start()
+            self._score_thread = threading.Thread(
+                target=self._score_loop, name="illuminate-scoring", daemon=True
+            )
+            self._score_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
+        self._score_wake.set()
 
     def trigger(self) -> bool:
         """Ask for a run right now. Returns False if one is already in progress."""
@@ -88,6 +100,7 @@ class Service:
             finally:
                 self.running = False
                 self.phase = ""
+                self._score_wake.set()  # new jobs may be waiting for a score
 
     def _run_cycle(self) -> dict:
         now = time.time()
@@ -129,6 +142,7 @@ class Service:
                 if is_new:
                     new_jobs += 1
                     new_relevant += verdict.label != NO
+                    self._score_wake.set()  # score it now, without waiting for the check to end
             if result.note:
                 notes.append(result.note)
             if not result.complete:
@@ -221,6 +235,79 @@ class Service:
                 return
             self.store.set_bounds(job["id"], (lo, hi))
 
+    # ---- resume overlap ----------------------------------------------------
+
+    def resume_changed(self) -> None:
+        self.scoring_note = ""
+        self._score_wake.set()
+
+    def _score_loop(self) -> None:
+        """Runs beside the checker, so a new job appears at once and its score follows."""
+        while not self._stop.is_set():
+            self._score_wake.clear()
+            try:
+                more = self.score_pending()
+            except Exception:
+                log.exception("scoring failed")
+                more = False
+            if not more:
+                # Wake on a new job or resume; otherwise look again in five minutes
+                # (which also retries after a paused state such as a rate limit).
+                self._score_wake.wait(300)
+
+    def score_pending(self, limit: int = 20) -> bool:
+        """Score jobs that have no overlap yet. Returns True if more may remain."""
+        resume = self.store.resume()
+        if not resume:
+            self.scoring_note = ""
+            return False
+        if not self.scorer.available():
+            self.scoring_note = "Add your Anthropic API key to turn on Resume Overlap (see the README)."
+            return False
+        jobs = self.store.unscored(resume["id"], limit)
+        for job in jobs:
+            if self._stop.is_set():
+                return False
+            current = self.store.resume()
+            if not current or current["id"] != resume["id"]:
+                return True  # the resume was replaced: start over with the new one
+            try:
+                self._score_job(job, resume)
+                self.scoring_note = ""
+            except scoring.ScoringUnavailable as error:
+                self.scoring_note = str(error)
+                log.info("resume overlap paused: %s", error)
+                return False
+            except RateLimited:
+                self.scoring_note = "LinkedIn is limiting requests; Resume Overlap will continue shortly."
+                return False
+            except LinkedInError:
+                return False  # the app is stopping
+            except Exception as error:
+                log.exception("could not score job %s", job["id"])
+                self.store.save_score(job["id"], resume["id"], None, None, f"Scoring failed: {error}")
+        return len(jobs) == limit
+
+    def _score_job(self, job: dict, resume: dict) -> None:
+        if not job["description"] and not job["detail_failed"]:
+            detail = self.client.job_detail(job["id"])
+            self.store.save_detail(
+                job["id"], detail.description if detail else None,
+                detail.criteria if detail else None, detail.logo_url if detail else None,
+            )
+            job["description"] = detail.description if detail else None
+            job["criteria"] = detail.criteria if detail else {}
+        if not job["description"]:
+            self.store.save_score(
+                job["id"], resume["id"], None, None,
+                "LinkedIn no longer shows this job's description.",
+            )
+            return
+        assessment = self.scorer.assess(resume["text"], job)
+        self.store.save_score(
+            job["id"], resume["id"], scoring.overall(assessment), scoring.to_detail(assessment)
+        )
+
     # ---- status -----------------------------------------------------------
 
     def status(self) -> dict:
@@ -234,4 +321,17 @@ class Service:
             "imprecise": self.store.imprecise_count(),
             "version": self.store.version,
             "location": self.config.location,
+            "resume": self._resume_status(),
+        }
+
+    def _resume_status(self) -> dict | None:
+        resume = self.store.resume()
+        if not resume:
+            return None
+        return {
+            "filename": resume["filename"],
+            "uploaded_at": resume["uploaded_at"],
+            "note": self.scoring_note,
+            "has_key": self.scorer.available(),
+            **self.store.score_counts(),
         }

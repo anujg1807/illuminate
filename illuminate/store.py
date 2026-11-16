@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -33,6 +34,24 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS jobs_posted ON jobs (posted_at DESC);
 
+CREATE TABLE IF NOT EXISTS resumes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename    TEXT NOT NULL,
+    text        TEXT NOT NULL,
+    uploaded_at REAL NOT NULL
+);
+
+-- One Resume Overlap result per job per resume, computed once and kept.
+CREATE TABLE IF NOT EXISTS scores (
+    job_id     TEXT NOT NULL,
+    resume_id  INTEGER NOT NULL,
+    status     TEXT NOT NULL,         -- done / failed
+    score      REAL,                  -- 0 to 100
+    detail     TEXT NOT NULL,         -- JSON: the breakdown, or the reason it failed
+    created_at REAL NOT NULL,
+    PRIMARY KEY (job_id, resume_id)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at     REAL NOT NULL,
@@ -58,6 +77,16 @@ class Store:
         self._lock = threading.RLock()
         with self._lock, self._db:
             self._db.executescript(SCHEMA)
+            # Columns added after the first release.
+            have = {row["name"] for row in self._db.execute("PRAGMA table_info(jobs)")}
+            for column, kind in (
+                ("logo_url", "TEXT"),
+                ("description", "TEXT"),
+                ("criteria", "TEXT"),                       # JSON
+                ("detail_failed", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in have:
+                    self._db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {kind}")
             # A run left "running" means the app was closed mid-run.
             self._db.execute(
                 "UPDATE runs SET status = 'partial', note = 'interrupted' WHERE status = 'running'"
@@ -72,6 +101,17 @@ class Store:
 
     def upsert(self, card: Card, verdict: Verdict, bounds: Bounds, found_by: str) -> bool:
         """Add a job or update a known one. Returns True when the job is new."""
+        with self._lock:
+            is_new = self._upsert(card, verdict, bounds, found_by)
+            if card.logo_url:
+                with self._db:
+                    self._db.execute(
+                        "UPDATE jobs SET logo_url = ? WHERE id = ? AND logo_url IS NOT ?",
+                        (card.logo_url, card.id, card.logo_url),
+                    )
+            return is_new
+
+    def _upsert(self, card: Card, verdict: Verdict, bounds: Bounds, found_by: str) -> bool:
         with self._lock, self._db:
             row = self._db.execute(
                 "SELECT posted_lo, posted_hi FROM jobs WHERE id = ?", (card.id,)
@@ -131,15 +171,24 @@ class Store:
                     )
 
     def jobs(self, labels: list[str], limit: int = 3000) -> list[dict]:
-        """Jobs with the given labels, most recently posted first."""
+        """Jobs with the given labels, most recently posted first.
+
+        Each carries its Resume Overlap for the current resume, if scored.
+        """
         if not labels:
             return []
         marks = ",".join("?" * len(labels))
+        resume = self.resume()
         with self._lock:
             rows = self._db.execute(
-                f"SELECT * FROM jobs WHERE label IN ({marks})"
-                " ORDER BY posted_at DESC, first_seen_at DESC, id DESC LIMIT ?",
-                (*labels, limit),
+                "SELECT jobs.id, title, company, company_url, location, url, label, reason,"
+                " posted_lo, posted_hi, posted_at, found_by, first_seen_at, refine_failed,"
+                " logo_url, scores.status AS score_status, scores.score AS score,"
+                " scores.detail AS score_detail"
+                " FROM jobs LEFT JOIN scores ON scores.job_id = jobs.id AND scores.resume_id = ?"
+                f" WHERE label IN ({marks})"
+                " ORDER BY posted_at DESC, first_seen_at DESC, jobs.id DESC LIMIT ?",
+                (resume["id"] if resume else -1, *labels, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -167,6 +216,87 @@ class Store:
                 " AND posted_hi - posted_lo > ?",
                 (timing.PRECISE_SECONDS,),
             ).fetchone()[0]
+
+    # ---- resume and overlap scores ----------------------------------------
+
+    def save_resume(self, filename: str, text: str) -> int:
+        """Store a new resume. It replaces the previous one, and its scores."""
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM scores")
+            self._db.execute("DELETE FROM resumes")
+            cursor = self._db.execute(
+                "INSERT INTO resumes (filename, text, uploaded_at) VALUES (?, ?, ?)",
+                (filename, text, time.time()),
+            )
+            self._bump()
+            return int(cursor.lastrowid)
+
+    def resume(self) -> dict | None:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM resumes ORDER BY id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def remove_resume(self) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM scores")
+            self._db.execute("DELETE FROM resumes")
+            self._bump()
+
+    def unscored(self, resume_id: int, limit: int = 20) -> list[dict]:
+        """Relevant jobs with no score yet for this resume, newest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT jobs.* FROM jobs LEFT JOIN scores"
+                " ON scores.job_id = jobs.id AND scores.resume_id = ?"
+                " WHERE label IN ('match', 'maybe') AND scores.job_id IS NULL"
+                " ORDER BY posted_at DESC LIMIT ?",
+                (resume_id, limit),
+            ).fetchall()
+        jobs = [dict(row) for row in rows]
+        for job in jobs:
+            job["criteria"] = json.loads(job["criteria"]) if job["criteria"] else {}
+        return jobs
+
+    def score_counts(self) -> dict[str, int]:
+        resume = self.resume()
+        if not resume:
+            return {"done": 0, "pending": 0}
+        with self._lock:
+            done = self._db.execute(
+                "SELECT COUNT(*) FROM scores WHERE resume_id = ?", (resume["id"],)
+            ).fetchone()[0]
+            relevant = self._db.execute(
+                "SELECT COUNT(*) FROM jobs WHERE label IN ('match', 'maybe')"
+            ).fetchone()[0]
+        return {"done": done, "pending": max(0, relevant - done)}
+
+    def save_detail(
+        self, job_id: str, description: str | None, criteria: dict | None, logo_url: str | None = None
+    ) -> None:
+        with self._lock, self._db:
+            if logo_url:  # jobs found before logos were collected get theirs here
+                self._db.execute(
+                    "UPDATE jobs SET logo_url = ? WHERE id = ? AND logo_url IS NULL", (logo_url, job_id)
+                )
+            self._db.execute(
+                "UPDATE jobs SET description = ?, criteria = ?, detail_failed = ? WHERE id = ?",
+                (description, json.dumps(criteria or {}), int(description is None), job_id),
+            )
+
+    def save_score(
+        self, job_id: str, resume_id: int, score: int | None, detail: dict | None, error: str = ""
+    ) -> None:
+        """Record a job's overlap, once. A failed attempt is recorded too, so it is not retried."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO scores (job_id, resume_id, status, score, detail, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    job_id, resume_id, "done" if score is not None else "failed", score,
+                    json.dumps(detail if detail is not None else {"error": error}), time.time(),
+                ),
+            )
+            self._bump()
 
     # ---- runs -------------------------------------------------------------
 

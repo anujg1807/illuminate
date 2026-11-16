@@ -68,10 +68,48 @@
   .fit.maybe { background: var(--maybe-bg); color: var(--maybe-fg); }
   .fit.no { background: var(--no-bg); color: var(--no-fg); }
   .empty { padding: 48px 20px; text-align: center; color: var(--muted); }
+  .primary { background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
+  .primary:hover:not(:disabled) { opacity: 0.88; }
+  .resume { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px;
+    font-size: 14px; color: var(--muted); }
+  .resume b { color: var(--text); font-weight: 600; }
+  .linkish { border: 0; background: none; padding: 0; color: var(--link); text-decoration: underline; }
+  .company { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 56px; height: 56px; flex: none; border-radius: 10px; background: #fff;
+    border: 1px solid var(--line); object-fit: contain; }
+  .logo.blank { display: flex; align-items: center; justify-content: center; font-size: 22px;
+    font-weight: 700; color: var(--muted); background: var(--no-bg); }
+  td { vertical-align: middle; }
+  .overlap { font: inherit; font-weight: 700; font-variant-numeric: tabular-nums; border-radius: 999px;
+    padding: 4px 12px; border: 0; min-width: 58px; }
+  .overlap.high { background: var(--match-bg); color: var(--match-fg); }
+  .overlap.mid { background: var(--maybe-bg); color: var(--maybe-fg); }
+  .overlap.low { background: var(--no-bg); color: var(--no-fg); }
+  .pending { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  .pending::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 6px;
+    border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.9s linear infinite; vertical-align: -1px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  tr.detail td { background: var(--bg); padding: 16px 20px 20px; }
+  .detail p { margin: 0 0 12px; max-width: 760px; }
+  .dims { display: grid; grid-template-columns: minmax(170px, 220px) 120px 1fr; gap: 8px 14px;
+    align-items: center; font-size: 14px; margin-bottom: 14px; }
+  .meter { height: 8px; border-radius: 4px; background: var(--line); overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--accent); }
+  .dims .note { color: var(--muted); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; font-size: 14px; max-width: 900px; }
+  .cols h4 { margin: 0 0 4px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase;
+    color: var(--muted); }
+  .cols ul { margin: 0; padding-left: 18px; }
+  .warn-text { color: var(--warn); font-weight: 600; }
   .place small.only-narrow { display: none; }
   @media (max-width: 720px) {
     .wrap { padding: 0 16px 48px; }
     .col-location, .col-fit { display: none; }
+    .logo { width: 40px; height: 40px; }
+    .dims { grid-template-columns: 1fr 70px; }
+    .dims .note { grid-column: 1 / -1; margin-top: -4px; }
+    .cols { grid-template-columns: 1fr; }
     .place small.only-narrow { display: block; }
     td, th { padding: 10px 10px; }
   }
@@ -88,8 +126,12 @@
       <span class="dot" id="dot"></span>
       <span id="statusText">Starting…</span>
       <button id="refresh">Check now</button>
+      <button id="upload" class="primary">Upload resume</button>
+      <input type="file" id="file" accept=".pdf,.docx,.txt,.md" hidden>
     </div>
   </header>
+
+  <div class="resume" id="resume" hidden></div>
 
   <div class="bar">
     <button class="chip" data-label="match" aria-pressed="true">Product Manager<b id="n-match">0</b></button>
@@ -110,6 +152,7 @@
           <th>Company</th>
           <th class="col-location">Location</th>
           <th class="col-fit">Fit</th>
+          <th title="How well the job description matches your uploaded resume">Resume overlap</th>
         </tr>
       </thead>
       <tbody id="rows"></tbody>
@@ -140,6 +183,7 @@ const state = {
   status: null,
   known: null,          // ids already shown, to flash the ones that arrive live
   arrived: new Set(),
+  open: new Set(),      // jobs whose overlap breakdown is expanded
   unseen: 0,
 };
 
@@ -195,6 +239,99 @@ function whenCell(job) {
   return cell;
 }
 
+function logo(job) {
+  const blank = () => el("div", { class: "logo blank" }, (job.company.trim()[0] || "?").toUpperCase());
+  if (!job.logo_url) return blank();
+  const img = el("img", { class: "logo", src: job.logo_url, alt: "", loading: "lazy", referrerpolicy: "no-referrer" });
+  img.addEventListener("error", () => img.replaceWith(blank()));
+  return img;
+}
+
+function overlapCell(job) {
+  const cell = el("td", {});
+  const resume = state.status && state.status.resume;
+  const o = job.overlap;
+  if (!resume) {
+    cell.append(el("span", { class: "approx", title: "Upload a resume to see this" }, "–"));
+  } else if (job.label === "no") {
+    cell.append(el("span", { title: "Only product roles are scored" }, "–"));
+  } else if (!o) {
+    cell.append(resume.note
+      ? el("span", { class: "approx", title: resume.note }, "Paused")
+      : el("span", { class: "pending" }, "In progress"));
+  } else if (o.status === "failed") {
+    cell.append(el("span", { class: "approx", title: o.error }, "n/a"));
+  } else {
+    const band = o.score >= 70 ? "high" : o.score >= 50 ? "mid" : "low";
+    const pill = el("button", { class: "overlap " + band, title: o.summary + " Click for the breakdown." }, o.score + "%");
+    pill.addEventListener("click", () => {
+      state.open.has(job.id) ? state.open.delete(job.id) : state.open.add(job.id);
+      render();
+    });
+    cell.append(pill);
+  }
+  return cell;
+}
+
+function detailRow(job) {
+  const o = job.overlap;
+  const box = el("td", { colspan: "6" });
+  box.append(el("p", {}, o.summary));
+  if (o.dealbreaker) box.append(el("p", { class: "warn-text" }, "Hard requirement not met: " + o.dealbreaker));
+  const years = el("p", {});
+  years.append("Experience asked: ", el("b", {}, o.years_required || "not stated"),
+    " · Yours: ", el("b", {}, o.years_candidate || "unclear"));
+  box.append(years);
+  const dims = el("div", { class: "dims" });
+  for (const d of o.dimensions) {
+    const meter = el("div", { class: "meter" });
+    const bar = el("i", {}); bar.style.width = (d.applicable ? d.score : 0) + "%"; meter.append(bar);
+    dims.append(
+      el("div", {}, d.label + (d.applicable ? ` · ${d.score}` : " · not stated")),
+      meter, el("div", { class: "note" }, d.note));
+  }
+  box.append(dims);
+  const list = (title, items) => {
+    const ul = el("ul", {}); for (const item of items) ul.append(el("li", {}, item));
+    return el("div", {}, el("h4", {}, title), ul);
+  };
+  box.append(el("div", { class: "cols" }, list("Strengths", o.strengths || []), list("Gaps", o.gaps || [])));
+  return el("tr", { class: "detail" }, box);
+}
+
+function renderResume() {
+  const box = $("resume");
+  const r = state.status && state.status.resume;
+  $("upload").textContent = r ? "Replace resume" : "Upload resume";
+  box.hidden = !r;
+  if (!r) return;
+  const remove = el("button", { class: "linkish" }, "Remove");
+  remove.addEventListener("click", async () => {
+    if (!confirm("Remove your resume and its overlap scores?")) return;
+    await fetch("/api/resume", { method: "DELETE" }); state.open.clear(); poll();
+  });
+  let progress = r.pending ? `${r.done} of ${r.done + r.pending} jobs scored` : `all ${r.done} jobs scored`;
+  if (r.note) progress = r.note;
+  box.replaceChildren("Resume: ", el("b", {}, r.filename), " · ",
+    r.note ? el("span", { class: "warn-text" }, progress) : progress, " · ", remove);
+}
+
+async function uploadResume(file) {
+  const button = $("upload");
+  button.disabled = true; button.textContent = "Uploading…";
+  try {
+    const response = await fetch("/api/resume", {
+      method: "POST", body: file, headers: { "X-Filename": encodeURIComponent(file.name) },
+    });
+    const body = await response.json();
+    if (!response.ok) alert(body.error || "The upload failed.");
+    state.open.clear();
+  } catch { alert("The upload failed. Is Illuminate still running?"); }
+  button.disabled = false;
+  $("file").value = "";
+  await poll();
+}
+
 function render() {
   const q = $("q").value.trim().toLowerCase();
   const visible = state.jobs.filter((job) =>
@@ -203,16 +340,19 @@ function render() {
     const title = el("a", { class: "title", href: job.url, target: "_blank", rel: "noopener" }, job.title);
     const role = el("td", {}, title);
     if (job.first_seen_at > lastVisit) role.append(el("span", { class: "new" }, "NEW"));
-    const company = el("td", { class: "place" }, job.company,
+    const name = el("div", { class: "place" }, job.company,
       el("small", { class: "only-narrow" }, job.location));
+    const company = el("td", {}, el("div", { class: "company" }, logo(job), name));
     const row = el("tr", {},
       whenCell(job), role, company,
       el("td", { class: "col-location" }, job.location),
-      el("td", { class: "col-fit" }, el("span", { class: "fit " + job.label, title: job.reason }, FIT[job.label])));
+      el("td", { class: "col-fit" }, el("span", { class: "fit " + job.label, title: job.reason }, FIT[job.label])),
+      overlapCell(job));
     if (state.arrived.has(job.id)) row.classList.add("fresh");
-    return row;
+    const open = state.open.has(job.id) && job.overlap && job.overlap.status === "done";
+    return open ? [row, detailRow(job)] : [row];
   });
-  $("rows").replaceChildren(...rows);
+  $("rows").replaceChildren(...rows.flat());
   state.arrived.clear();
 
   const total = state.jobs.length;
@@ -246,6 +386,7 @@ function renderStatus() {
   $("statusText").textContent = text;
   $("dot").className = "dot " + dot;
   $("refresh").disabled = s.running;
+  renderResume();
   $("sub").textContent = `Product Manager jobs on LinkedIn · ${s.location} · checked every ${s.interval_minutes} minutes`;
   for (const label of ["match", "maybe", "no"]) $("n-" + label).textContent = s.counts[label];
 
@@ -254,7 +395,7 @@ function renderStatus() {
     notice.hidden = false;
     notice.textContent = "The last check was incomplete (" + (run.note || "interrupted") +
       "). Nothing is lost: the next check searches back far enough to cover the gap.";
-  } else if (run && run.note) {
+  } else if (!s.running && run && run.note) {
     notice.hidden = false; notice.textContent = run.note;
   } else {
     notice.hidden = true;
@@ -283,9 +424,11 @@ async function loadJobs() {
 // anything changed and reloads the table when it has. No manual refresh needed.
 async function poll() {
   try {
+    const before = JSON.stringify(state.status && state.status.resume);
     state.status = await (await fetch("/api/status")).json();
     renderStatus();
     if (state.status.version !== state.version) await loadJobs();
+    else if (before !== JSON.stringify(state.status.resume)) render();
   } catch {
     $("statusText").textContent = "Illuminate is not running. Start it again to resume checks.";
     $("dot").className = "dot warn";
@@ -304,6 +447,8 @@ for (const chip of document.querySelectorAll(".chip")) {
   });
 }
 $("q").addEventListener("input", render);
+$("upload").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", () => { if ($("file").files[0]) uploadResume($("file").files[0]); });
 $("refresh").addEventListener("click", async () => {
   $("refresh").disabled = true;
   await fetch("/api/refresh", { method: "POST" });
@@ -314,7 +459,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 poll();
-setInterval(poll, 5000);
+setInterval(poll, 3000);
 setInterval(() => {
   const now = Date.now() / 1000;
   for (const node of document.querySelectorAll("[data-ago]")) node.textContent = ago(now - Number(node.dataset.ago));

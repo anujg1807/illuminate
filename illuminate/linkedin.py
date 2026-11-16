@@ -20,6 +20,7 @@ from typing import Callable
 from bs4 import BeautifulSoup
 
 SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/"
 PAGE_SIZE = 10
 # LinkedIn never returns more than about 1000 results for one search.
 RESULT_CAP = 1000
@@ -58,6 +59,7 @@ class Card:
     location: str
     posted_label: str | None
     seen_at: float
+    logo_url: str | None = None
 
     @property
     def url(self) -> str:
@@ -90,6 +92,8 @@ def parse_cards(html: str, seen_at: float) -> list[Card]:
         company_link = company.find("a", href=True) if company else None
         location = node.find(class_="job-search-card__location")
         posted = node.find("time")
+        logo = node.find("img", class_="artdeco-entity-image")
+        logo_url = (logo.get("data-delayed-url") or logo.get("src")) if logo else None
         cards.append(
             Card(
                 id=job_id,
@@ -99,9 +103,44 @@ def parse_cards(html: str, seen_at: float) -> list[Card]:
                 location=location.get_text(strip=True) if location else "",
                 posted_label=posted.get_text(strip=True) if posted else None,
                 seen_at=seen_at,
+                logo_url=str(logo_url) if logo_url else None,
             )
         )
     return cards
+
+
+@dataclass(frozen=True)
+class JobDetail:
+    """The full posting: the description and LinkedIn's summary facts."""
+
+    description: str
+    # e.g. {"Seniority level": "Mid-Senior level", "Employment type": "Full-time"}
+    criteria: dict[str, str]
+    logo_url: str | None = None
+
+
+def parse_detail(html: str) -> JobDetail | None:
+    soup = BeautifulSoup(html, "html.parser")
+    body = soup.find(class_="show-more-less-html__markup")
+    if body is None:
+        return None
+    for br in body.find_all("br"):
+        br.replace_with("\n")
+    for item in body.find_all("li"):
+        item.insert_before("\n- ")
+    lines = [" ".join(line.split()) for line in body.get_text().splitlines()]
+    description = "\n".join(line for line in lines if line)
+    criteria = {}
+    for item in soup.find_all(class_="description__job-criteria-item"):
+        name = item.find(class_="description__job-criteria-subheader")
+        value = item.find(class_="description__job-criteria-text")
+        if name and value:
+            criteria[name.get_text(strip=True)] = value.get_text(strip=True)
+    logo = soup.find("img", class_="artdeco-entity-image")
+    logo_url = (logo.get("data-delayed-url") or logo.get("src")) if logo else None
+    if not description:
+        return None
+    return JobDetail(description, criteria, str(logo_url) if logo_url else None)
 
 
 def _default_fetch() -> Callable[[dict], tuple[int, str]]:
@@ -111,7 +150,10 @@ def _default_fetch() -> Callable[[dict], tuple[int, str]]:
     session = requests.Session(impersonate="chrome")
 
     def fetch(params: dict) -> tuple[int, str]:
-        response = session.get(SEARCH_URL, params=params, headers=HEADERS, timeout=30)
+        if "job_id" in params:  # one job's full posting
+            response = session.get(DETAIL_URL + str(params["job_id"]), headers=HEADERS, timeout=30)
+        else:
+            response = session.get(SEARCH_URL, params=params, headers=HEADERS, timeout=30)
         return response.status_code, response.text
 
     return fetch
@@ -135,6 +177,9 @@ class LinkedInClient:
         self._stop = stop or threading.Event()
         self._last_request = 0.0
         self.requests_made = 0
+        # The checker and the resume scorer share this client from two threads;
+        # the lock keeps their requests paced one after another.
+        self._lock = threading.Lock()
 
     def _sleep(self, seconds: float) -> None:
         if seconds > 0 and self._stop.wait(seconds):
@@ -142,6 +187,10 @@ class LinkedInClient:
 
     def _get(self, params: dict) -> tuple[str, float]:
         """One paced request. Returns the page and the time it was read."""
+        with self._lock:
+            return self._get_unlocked(params)
+
+    def _get_unlocked(self, params: dict) -> tuple[str, float]:
         if self._fetch is None:
             self._fetch = _default_fetch()
         problem = ""
@@ -184,6 +233,21 @@ class LinkedInClient:
         if not cards and len(text.strip()) > 200:
             raise LinkedInError("LinkedIn returned an unexpected page (possibly blocked)")
         return cards
+
+    def job_detail(self, job_id: str) -> JobDetail | None:
+        """The full posting for one job, or None if LinkedIn no longer shows it.
+
+        Raises RateLimited when LinkedIn is throttling, so the caller can wait.
+        """
+        try:
+            text, _ = self._get({"job_id": job_id})
+        except RateLimited:
+            raise
+        except LinkedInError as error:
+            if str(error) == "stopped":
+                raise
+            return None
+        return parse_detail(text)
 
     def search(self, keywords: str, location: str, window_seconds: int) -> SearchResult:
         """Every result for a search, following pages until LinkedIn has no more.

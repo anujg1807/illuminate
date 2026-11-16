@@ -44,6 +44,43 @@ The job list is stored in `data/illuminate.db`. Delete that file to start over.
    posting time to the minute in about eight requests. Until that is done the
    time is shown with "≈".
 
+## Resume Overlap
+
+Click **Upload resume** and choose a PDF, Word (.docx) or text file. Each
+product role then gets a percentage showing how well its job description
+matches your resume. Click a percentage to see the breakdown. Your resume is
+stored only in `data/illuminate.db` on this computer; its text is sent to
+Anthropic's API for scoring, and nowhere else.
+
+Scoring uses Claude, so it needs an Anthropic API key (this is separate from a
+Claude subscription and is billed per use):
+
+1. Create a key at https://console.anthropic.com/settings/keys and add credit.
+2. In this folder, create a file named `.env` containing one line:
+
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+
+3. Restart the app. The `.env` file is ignored by git, so the key is never pushed.
+
+How it works:
+
+- A new job appears in the table straight away with "In progress"; its
+  percentage follows a few seconds later.
+- Each job is scored once per resume and the result is stored. Uploading a new
+  resume clears the scores and scores every job again.
+- Claude rates six things from 0 to 100 and the percentage is their weighted
+  average: role and responsibilities (25%), experience and seniority (20%),
+  skills and tools (20%), domain and industry (15%), product and company
+  context (10%), and stated requirements such as education or location (10%).
+  Anything the posting does not mention is left out rather than counted as
+  zero. If the posting states a hard requirement your resume clearly fails,
+  the percentage is capped at 55.
+- The model is set in `config.toml` under `[scoring]`. The default,
+  `claude-opus-5-5`, costs roughly 3 to 5 US cents per job; the file lists
+  cheaper options.
+
 ## Settings
 
 Edit `config.toml` and restart. You can change the location, the search
@@ -74,7 +111,9 @@ uv run pytest
 | `illuminate/classifier.py` | The title rules |
 | `illuminate/timing.py` | Working out posting times |
 | `illuminate/store.py` | The SQLite database |
-| `illuminate/service.py` | The 15-minute cycle |
+| `illuminate/service.py` | The 15-minute cycle and the scoring worker |
+| `illuminate/scoring.py` | The Resume Overlap rubric and the call to Claude |
+| `illuminate/resume.py` | Reading text from an uploaded resume |
 | `illuminate/web.py`, `illuminate/static/index.html` | The page |
 
 The LinkedIn approach follows [JobSpy](https://github.com/speedyapply/JobSpy) (MIT licence).

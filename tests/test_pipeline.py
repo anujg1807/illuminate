@@ -304,3 +304,170 @@ def test_api(world):
         assert status["counts"] == {"match": 1, "maybe": 0, "no": 1}
         assert status["last_run"]["status"] == "ok" and status["version"] == body["version"]
         assert api.post("/api/refresh").json() == {"started": True}
+
+
+# ---- resume overlap -------------------------------------------------------
+
+from illuminate import scoring
+from illuminate.linkedin import parse_detail
+from illuminate.resume import ResumeError, extract_text
+
+DETAIL = """<div class="show-more-less-html__markup"><strong>About</strong><br>Own the roadmap.
+<ul><li>5+ years in product</li><li>SQL</li></ul></div>
+<ul><li class="description__job-criteria-item"><h3 class="description__job-criteria-subheader">
+Seniority level</h3><span class="description__job-criteria-text"> Mid-Senior level </span></li></ul>"""
+
+
+def assessment(score=80, dealbreaker=False, skip=()):
+    dims = {
+        name: scoring.Dimension(score=score, applicable=name not in skip, note="ok")
+        for name in scoring.DIMENSIONS
+    }
+    return scoring.Assessment(
+        **dims, years_required="5+ years", years_candidate="7 years", dealbreaker=dealbreaker,
+        dealbreaker_reason="needs a CA" if dealbreaker else None, strengths=["roadmaps"],
+        gaps=["SQL"], summary="Good match.",
+    )
+
+
+class FakeScorer:
+    def __init__(self):
+        self.calls = []
+        self.key = True
+
+    def available(self):
+        return self.key
+
+    def assess(self, resume_text, job):
+        self.calls.append((resume_text, job["id"], job["description"]))
+        return assessment(60 if "Owner" in job["title"] else 80)
+
+
+@pytest.fixture
+def scored(world):
+    clock, fake, store, service = world
+    original = fake.__call__
+
+    def with_details(params):
+        if "job_id" in params:
+            fake.calls.append(params)
+            return (404, "") if params["job_id"] == "gone" else (200, DETAIL)
+        return original(params)
+
+    service.client._fetch = with_details
+    service.scorer = FakeScorer()
+    return clock, fake, store, service
+
+
+def test_weights_add_up_and_overall_is_a_weighted_average():
+    assert sum(weight for weight, _, _ in scoring.DIMENSIONS.values()) == 100
+    a = assessment(80)
+    a.role.score = 40  # weight 25
+    assert scoring.overall(a) == 70
+    assert scoring.overall(assessment(90, dealbreaker=True)) == scoring.DEALBREAKER_CAP
+    # A dimension the posting says nothing about is left out, not counted as zero.
+    assert scoring.overall(assessment(80, skip=("domain", "context"))) == 80
+
+
+def test_parse_detail():
+    detail = parse_detail(DETAIL)
+    assert "Own the roadmap." in detail.description and "- 5+ years in product" in detail.description
+    assert detail.criteria == {"Seniority level": "Mid-Senior level"}
+    assert parse_detail("<html>sign in</html>") is None
+
+
+def test_logo_is_read_from_the_card():
+    html = card_html("1", "Product Manager").replace(
+        '<div class="base-search-card__info">',
+        '<img class="artdeco-entity-image" data-delayed-url="https://media.example/logo.png">'
+        '<div class="base-search-card__info">')
+    assert parse_cards(html, 1.0)[0].logo_url == "https://media.example/logo.png"
+
+
+def test_resume_text_extraction():
+    assert "Product leader" in extract_text("cv.txt", ("Product leader. " * 30).encode())
+    with pytest.raises(ResumeError):
+        extract_text("cv.txt", b"too short")
+    with pytest.raises(ResumeError):
+        extract_text("cv.pages", b"x" * 500)
+
+
+def test_jobs_appear_first_and_are_scored_once(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=600)
+    fake.add("2", "Product Owner", age_seconds=300)
+    fake.add("3", "Project Manager", age_seconds=200)
+    store.save_resume("cv.pdf", "resume text")
+    service.run_cycle()
+    # Listed straight away, with the overlap still to come.
+    assert [(job["id"], job["score_status"]) for job in store.jobs(["match"])] == [("2", None), ("1", None)]
+    assert service.score_pending() is False
+    assert [(job["id"], job["score"]) for job in store.jobs(["match"])] == [("2", 60), ("1", 80)]
+    assert len(service.scorer.calls) == 2  # the project manager is not scored
+    assert "Own the roadmap." in service.scorer.calls[0][2]
+    # Nothing is scored twice: not on the next pass, nor after the next check.
+    service.score_pending()
+    clock.now += 900
+    service.run_cycle()
+    service.score_pending()
+    assert len(service.scorer.calls) == 2
+
+
+def test_new_resume_rescores_everything(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=600)
+    store.save_resume("old.pdf", "old resume")
+    service.run_cycle()
+    service.score_pending()
+    details_fetched = sum("job_id" in call for call in fake.calls)
+    store.save_resume("new.pdf", "new resume")
+    assert store.jobs(["match"])[0]["score_status"] is None
+    service.score_pending()
+    assert [call[0] for call in service.scorer.calls] == ["old resume", "new resume"]
+    # The job description was kept, so LinkedIn is not asked for it again.
+    assert sum("job_id" in call for call in fake.calls) == details_fetched
+
+
+def test_no_scoring_without_resume_or_key(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=600)
+    service.run_cycle()
+    service.score_pending()
+    assert service.scorer.calls == []
+    store.save_resume("cv.pdf", "resume text")
+    service.scorer.key = False
+    service.score_pending()
+    assert service.scorer.calls == [] and "API key" in service.scoring_note
+    assert service.status()["resume"]["pending"] == 1
+
+
+def test_job_without_a_description_is_marked_not_retried(scored):
+    clock, fake, store, service = scored
+    fake.add("gone", "Product Manager", age_seconds=600)
+    store.save_resume("cv.pdf", "resume text")
+    service.run_cycle()
+    service.score_pending()
+    service.score_pending()
+    job = store.jobs(["match"])[0]
+    assert job["score_status"] == "failed" and service.scorer.calls == []
+    assert sum("job_id" in call for call in fake.calls) == 1
+
+
+def test_resume_api(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=600)
+    service.run_cycle()
+    with TestClient(create_app(service, store, run_scheduler=False)) as api:
+        assert api.get("/api/status").json()["resume"] is None
+        bad = api.post("/api/resume", content=b"hi", headers={"X-Filename": "cv.txt"})
+        assert bad.status_code == 400 and "text" in bad.json()["error"]
+        good = api.post("/api/resume", content=b"Product leader. " * 30, headers={"X-Filename": "my%20cv.txt"})
+        assert good.json()["filename"] == "my cv.txt"
+        assert api.get("/api/jobs").json()["jobs"][0]["overlap"] is None
+        service.score_pending()
+        overlap = api.get("/api/jobs").json()["jobs"][0]["overlap"]
+        assert overlap["score"] == 80 and overlap["years_required"] == "5+ years"
+        assert len(overlap["dimensions"]) == 6
+        assert api.get("/api/status").json()["resume"]["done"] == 1
+        api.delete("/api/resume")
+        assert api.get("/api/status").json()["resume"] is None

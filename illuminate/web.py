@@ -5,14 +5,27 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+import json
+from urllib.parse import unquote
+
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 
 from . import timing
+from .resume import ResumeError, extract_text
 from .service import Service
 from .store import Store
 
 STATIC = Path(__file__).parent / "static"
+
+
+def _overlap(row: dict) -> dict | None:
+    if row["score_status"] is None:
+        return None
+    detail = json.loads(row["score_detail"])
+    if row["score_status"] == "failed":
+        return {"status": "failed", "error": detail.get("error", "")}
+    return {"status": "done", "score": round(row["score"]), **detail}
 LABELS = ("match", "maybe", "no")
 
 
@@ -50,6 +63,9 @@ def create_app(service: Service, store: Store, run_scheduler: bool = True) -> Fa
                     "uncertainty": (row["posted_hi"] - row["posted_lo"]) / 2,
                     "precise": timing.is_precise((row["posted_lo"], row["posted_hi"])),
                     "first_seen_at": row["first_seen_at"],
+                    "logo_url": row["logo_url"],
+                    # Resume Overlap: None until scored; then done or failed.
+                    "overlap": _overlap(row),
                 }
                 for row in rows
             ],
@@ -58,6 +74,24 @@ def create_app(service: Service, store: Store, run_scheduler: bool = True) -> Fa
     @app.get("/api/status")
     def status() -> dict:
         return service.status()
+
+    @app.post("/api/resume")
+    async def upload_resume(request: Request):
+        """The file is sent as the request body, its name in the X-Filename header."""
+        filename = unquote(request.headers.get("x-filename", "resume"))
+        try:
+            text = extract_text(filename, await request.body())
+        except ResumeError as error:
+            return JSONResponse({"error": str(error)}, status_code=400)
+        store.save_resume(filename, text)
+        service.resume_changed()
+        return {"filename": filename, "characters": len(text)}
+
+    @app.delete("/api/resume")
+    def remove_resume() -> dict:
+        store.remove_resume()
+        service.resume_changed()
+        return {"removed": True}
 
     @app.post("/api/refresh")
     def refresh() -> dict:

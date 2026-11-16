@@ -33,5 +33,11 @@ max_delay_seconds = 6
 # Extra requests per cycle spent pinning down exact posting times of older jobs.
 refine_requests_per_cycle = 30
 
+[scoring]
+# The Claude model that rates how well your resume matches each job.
+# "claude-opus-5-5" judges best. "claude-sonnet-5-5" costs about half as much
+# and "claude-haiku-5-5" a small fraction, with less careful judgement.
+model = "claude-opus-5-5"
+
 [server]
 port = 8000
