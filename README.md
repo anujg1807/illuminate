@@ -82,10 +82,15 @@ can force one or the other.
 
 How it works:
 
-- A new job appears in the table straight away with "In progress"; its
-  percentage follows a few seconds later.
-- Each job is scored once per resume and the result is stored. Uploading a new
-  resume clears the scores and scores every job again.
+- When you upload a resume, the latest 50 product roles are graded. Every job
+  found after that is graded automatically as it arrives; it appears in the
+  table straight away with "In progress" and its percentage follows.
+- Any other job has a small **Grade** button: click it to grade that job
+  against your uploaded resume. Clicked jobs go to the front of the line.
+- Each job is graded once, ever, and the grade is kept for good. Uploading a
+  new resume (or removing it) never regrades anything: the new resume is used
+  only for jobs not graded yet. Each grade's breakdown says which resume it was
+  graded against.
 - Claude rates six things from 0 to 100 and the percentage is their weighted
   average: role and responsibilities (25%), experience and seniority (20%),
   skills and tools (20%), domain and industry (15%), product and company

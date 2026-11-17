@@ -79,6 +79,7 @@ def create_app(
                     "logo_url": row["logo_url"],
                     # Resume Overlap: None until scored; then done or failed.
                     "overlap": _overlap(row),
+                    "queued": bool(row["queued"]),
                 }
                 for row in rows
             ],
@@ -121,6 +122,13 @@ def create_app(
         service.scorer.reset()
         service.resume_changed()
         return {"saved": True}
+
+    @app.post("/api/jobs/{job_id}/grade")
+    def grade(job_id: str):
+        problem = service.grade_now(job_id)
+        if problem:
+            return JSONResponse({"error": problem}, status_code=400)
+        return {"queued": True}
 
     @app.post("/api/refresh")
     def refresh() -> dict:

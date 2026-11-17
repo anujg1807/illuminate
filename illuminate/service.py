@@ -164,7 +164,9 @@ class Service:
                 if is_new:
                     new_jobs += 1
                     new_relevant += verdict.label != NO
-                    self._score_wake.set()  # score it now, without waiting for the check to end
+                    if verdict.label != NO and self.store.resume():
+                        self.store.queue_grade(card.id)  # new jobs are graded as they arrive
+                        self._score_wake.set()  # now, without waiting for the check to end
             if result.note:
                 notes.append(result.note)
             if not result.complete:
@@ -259,6 +261,16 @@ class Service:
 
     # ---- resume overlap ----------------------------------------------------
 
+    def grade_now(self, job_id: str) -> str | None:
+        """Queue one job to be graded next. Returns why not, or None."""
+        if not self.store.resume():
+            return "Upload your resume first."
+        if self.store.is_graded(job_id):
+            return "This job has already been graded."
+        self.store.queue_grade(job_id, manual=True)
+        self._score_wake.set()
+        return None
+
     def resume_changed(self) -> None:
         self.scoring_note = ""
         self._score_wake.set()
@@ -286,6 +298,8 @@ class Service:
         for job in jobs:
             if self._stop.is_set():
                 return False
+            if self._score_wake.is_set():
+                return True  # a resume, a new job or a Grade click is waiting: grade first
             try:
                 detail = self.client.job_detail(job["id"])
             except LinkedInError:  # rate limited or stopping: try again later
@@ -309,8 +323,15 @@ class Service:
                 "Resume Overlap (see the README), or paste an API key below."
             )
             return False
-        jobs = self.store.unscored(resume["id"], limit)
-        for job in jobs:
+        graded = 0
+        while graded < limit:
+            # Ask for the next job each time, so a job whose Grade button was
+            # just clicked is graded next rather than after a whole batch.
+            jobs = self.store.unscored(resume["id"], 1)
+            if not jobs:
+                return False
+            job = jobs[0]
+            graded += 1
             if self._stop.is_set():
                 return False
             current = self.store.resume()
@@ -331,7 +352,7 @@ class Service:
             except Exception as error:
                 log.exception("could not score job %s", job["id"])
                 self.store.save_score(job["id"], resume["id"], None, None, f"Scoring failed: {error}")
-        return len(jobs) == limit
+        return True  # the limit was reached; more may remain
 
     def _score_job(self, job: dict, resume: dict) -> None:
         if not job["description"] and not job["detail_failed"]:

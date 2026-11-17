@@ -89,6 +89,7 @@
   .overlap.high { background: var(--match-bg); color: var(--match-fg); }
   .overlap.mid { background: var(--maybe-bg); color: var(--maybe-fg); }
   .overlap.low { background: var(--no-bg); color: var(--no-fg); }
+  .grade { font-size: 13px; padding: 3px 12px; border-radius: 999px; }
   .pending { color: var(--muted); font-size: 13px; white-space: nowrap; }
   .pending::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 6px;
     border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%;
@@ -265,12 +266,21 @@ function overlapCell(job) {
   const cell = el("td", {});
   const resume = state.status && state.status.resume;
   const o = job.overlap;
-  if (!resume) {
-    cell.append(el("span", { class: "approx", title: "Upload a resume to see this" }, "–"));
-  } else if (job.label === "no") {
+  if (job.label === "no" && !o) {
     cell.append(el("span", { title: "Only product roles are scored" }, "–"));
+  } else if (!o && !resume) {
+    cell.append(el("span", { class: "approx", title: "Upload a resume to see this" }, "–"));
   } else if (!o && !resume.has_key) {
     cell.append(el("span", { class: "approx", title: "Set up Claude Code or an API key to turn on Resume Overlap" }, "Needs setup"));
+  } else if (!o && !job.queued) {
+    const button = el("button", { class: "grade", title: "Grade this job against " + resume.filename }, "Grade");
+    button.addEventListener("click", async () => {
+      button.disabled = true; button.textContent = "Queued…";
+      const response = await fetch(`/api/jobs/${job.id}/grade`, { method: "POST" });
+      if (!response.ok) { alert((await response.json()).error); button.disabled = false; button.textContent = "Grade"; }
+      poll();
+    });
+    cell.append(button);
   } else if (!o) {
     cell.append(resume.note
       ? el("span", { class: "approx", title: resume.note }, "Paused")
@@ -295,6 +305,7 @@ function detailRow(job) {
   box.append(el("p", {}, o.summary));
   if (o.dealbreaker) box.append(el("p", { class: "warn-text" }, "Hard requirement not met: " + o.dealbreaker));
   const years = el("p", {});
+  if (o.resume) box.append(el("p", { class: "approx" }, "Graded once against " + o.resume + ". Grades are never redone."));
   years.append("Experience asked: ", el("b", {}, o.years_required || "not stated"),
     " · Yours: ", el("b", {}, o.years_candidate || "unclear"));
   box.append(years);
@@ -323,10 +334,10 @@ function renderResume() {
   if (!r) return;
   const remove = el("button", { class: "linkish" }, "Remove");
   remove.addEventListener("click", async () => {
-    if (!confirm("Remove your resume and its overlap scores?")) return;
+    if (!confirm("Remove your resume? Jobs already graded keep their grades; new jobs won't be graded until you upload one.")) return;
     await fetch("/api/resume", { method: "DELETE" }); state.open.clear(); poll();
   });
-  let progress = r.pending ? `${r.done} of ${r.done + r.pending} jobs scored` : `all ${r.done} jobs scored`;
+  let progress = `${r.done} graded` + (r.pending ? ` · ${r.pending} in progress` : "");
   if (r.note) progress = r.note;
   if (!r.has_key) progress = "Install Claude Code and sign in to turn on Resume Overlap (see the README), then restart Illuminate. Or paste an API key below.";
   else if (r.method && !r.note) progress += ` · using your ${r.method}`;
@@ -360,6 +371,10 @@ function keyForm() {
 }
 
 async function uploadResume(file) {
+  const r = state.status && state.status.resume;
+  if (r && r.done && !confirm(`Jobs already graded keep their grades (${r.done} so far). The new resume will grade the latest 50 jobs not graded yet; use the Grade button for others. Continue?`)) {
+    $("file").value = ""; return;
+  }
   const button = $("upload");
   button.disabled = true; button.textContent = "Uploading…";
   try {

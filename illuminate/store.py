@@ -52,6 +52,14 @@ CREATE TABLE IF NOT EXISTS scores (
     PRIMARY KEY (job_id, resume_id)
 );
 
+-- Jobs waiting to be graded: the latest 50 when a resume is uploaded, jobs
+-- found after that, and any job whose Grade button was clicked (first in line).
+CREATE TABLE IF NOT EXISTS grade_queue (
+    job_id       TEXT PRIMARY KEY,
+    requested_at REAL NOT NULL,
+    manual       INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at     REAL NOT NULL,
@@ -66,6 +74,10 @@ CREATE TABLE IF NOT EXISTS runs (
     note           TEXT NOT NULL DEFAULT ''
 );
 """
+
+
+# When a resume is uploaded, the latest this-many product roles are graded.
+AUTO_GRADE_LATEST = 50
 
 
 class Store:
@@ -178,22 +190,23 @@ class Store:
     def jobs(self, labels: list[str], limit: int = 3000) -> list[dict]:
         """Jobs with the given labels, most recently posted first.
 
-        Each carries its Resume Overlap for the current resume, if scored.
+        Each carries its Resume Overlap, if it has been graded (against
+        whichever resume was loaded at the time).
         """
         if not labels:
             return []
         marks = ",".join("?" * len(labels))
-        resume = self.resume()
         with self._lock:
             rows = self._db.execute(
                 "SELECT jobs.id, title, company, company_url, location, url, label, reason,"
                 " posted_lo, posted_hi, posted_at, found_by, first_seen_at, refine_failed,"
                 " logo_url, scores.status AS score_status, scores.score AS score,"
-                " scores.detail AS score_detail"
-                " FROM jobs LEFT JOIN scores ON scores.job_id = jobs.id AND scores.resume_id = ?"
+                " scores.detail AS score_detail, grade_queue.job_id IS NOT NULL AS queued"
+                " FROM jobs LEFT JOIN scores ON scores.job_id = jobs.id"
+                " LEFT JOIN grade_queue ON grade_queue.job_id = jobs.id"
                 f" WHERE label IN ({marks})"
                 " ORDER BY posted_at DESC, first_seen_at DESC, jobs.id DESC LIMIT ?",
-                (resume["id"] if resume else -1, *labels, limit),
+                (*labels, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -225,10 +238,24 @@ class Store:
     # ---- resume and overlap scores ----------------------------------------
 
     def save_resume(self, filename: str, text: str) -> int:
-        """Store a new resume. It replaces the previous one, and its scores."""
+        """Store a new resume in place of the previous one.
+
+        Grades are never cleared: a job graded once keeps its grade for good,
+        and the new resume is used only for jobs not graded yet. Of those, the
+        ones among the latest AUTO_GRADE_LATEST product roles are queued for
+        grading; the rest wait for their Grade button.
+        """
         with self._lock, self._db:
-            self._db.execute("DELETE FROM scores")
-            self._db.execute("DELETE FROM resumes")
+            latest = self._db.execute(
+                "SELECT id FROM jobs WHERE label IN ('match', 'maybe')"
+                " ORDER BY posted_at DESC LIMIT ?",
+                (AUTO_GRADE_LATEST,),
+            ).fetchall()
+            now = time.time()
+            self._db.executemany(
+                "INSERT OR IGNORE INTO grade_queue (job_id, requested_at) VALUES (?, ?)",
+                [(row["id"], now) for row in latest],
+            )
             cursor = self._db.execute(
                 "INSERT INTO resumes (filename, text, uploaded_at) VALUES (?, ?, ?)",
                 (filename, text, time.time()),
@@ -238,14 +265,30 @@ class Store:
 
     def resume(self) -> dict | None:
         with self._lock:
-            row = self._db.execute("SELECT * FROM resumes ORDER BY id DESC LIMIT 1").fetchone()
+            row = self._db.execute(
+                "SELECT * FROM resumes WHERE text != '' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
         return dict(row) if row else None
 
     def remove_resume(self) -> None:
+        """Forget the resume's text. Grades already made are kept."""
         with self._lock, self._db:
-            self._db.execute("DELETE FROM scores")
-            self._db.execute("DELETE FROM resumes")
+            self._db.execute("UPDATE resumes SET text = ''")
             self._bump()
+
+    def queue_grade(self, job_id: str, manual: bool = False) -> None:
+        """Ask for a job to be graded (no effect once it has been graded)."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO grade_queue (job_id, requested_at, manual) VALUES (?, ?, ?)"
+                " ON CONFLICT (job_id) DO UPDATE SET manual = MAX(manual, excluded.manual)",
+                (job_id, time.time(), int(manual)),
+            )
+            self._bump()
+
+    def is_graded(self, job_id: str) -> bool:
+        with self._lock:
+            return self._db.execute("SELECT 1 FROM scores WHERE job_id = ?", (job_id,)).fetchone() is not None
 
     def missing_details(self, limit: int = 10) -> list[dict]:
         """Product roles whose full posting (and logo) has not been fetched yet, newest first."""
@@ -258,14 +301,13 @@ class Store:
         return [dict(row) for row in rows]
 
     def unscored(self, resume_id: int, limit: int = 20) -> list[dict]:
-        """Relevant jobs with no score yet for this resume, newest first."""
+        """Queued jobs not yet graded: clicked ones first, then newest first."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT jobs.* FROM jobs LEFT JOIN scores"
-                " ON scores.job_id = jobs.id AND scores.resume_id = ?"
-                " WHERE label IN ('match', 'maybe') AND scores.job_id IS NULL"
-                " ORDER BY posted_at DESC LIMIT ?",
-                (resume_id, limit),
+                "SELECT jobs.* FROM grade_queue JOIN jobs ON jobs.id = grade_queue.job_id"
+                " LEFT JOIN scores ON scores.job_id = jobs.id WHERE scores.job_id IS NULL"
+                " ORDER BY grade_queue.manual DESC, jobs.posted_at DESC LIMIT ?",
+                (limit,),
             ).fetchall()
         jobs = [dict(row) for row in rows]
         for job in jobs:
@@ -278,12 +320,14 @@ class Store:
             return {"done": 0, "pending": 0}
         with self._lock:
             done = self._db.execute(
-                "SELECT COUNT(*) FROM scores WHERE resume_id = ?", (resume["id"],)
+                "SELECT COUNT(DISTINCT jobs.id) FROM jobs JOIN scores ON scores.job_id = jobs.id"
+                " WHERE label IN ('match', 'maybe')"
             ).fetchone()[0]
-            relevant = self._db.execute(
-                "SELECT COUNT(*) FROM jobs WHERE label IN ('match', 'maybe')"
+            queued = self._db.execute(
+                "SELECT COUNT(*) FROM grade_queue LEFT JOIN scores ON scores.job_id = grade_queue.job_id"
+                " WHERE scores.job_id IS NULL"
             ).fetchone()[0]
-        return {"done": done, "pending": max(0, relevant - done)}
+        return {"done": done, "pending": queued}
 
     def save_detail(
         self, job_id: str, description: str | None, criteria: dict | None, logo_url: str | None = None
@@ -301,14 +345,22 @@ class Store:
     def save_score(
         self, job_id: str, resume_id: int, score: int | None, detail: dict | None, error: str = ""
     ) -> None:
-        """Record a job's overlap, once. A failed attempt is recorded too, so it is not retried."""
+        """Record a job's grade. A job is graded once, ever: a second grade is ignored.
+
+        A failed attempt is recorded too, so it is not retried.
+        """
         with self._lock, self._db:
+            if self._db.execute("SELECT 1 FROM scores WHERE job_id = ?", (job_id,)).fetchone():
+                return
+            row = self._db.execute("SELECT filename FROM resumes WHERE id = ?", (resume_id,)).fetchone()
+            detail = dict(detail) if detail is not None else {"error": error}
+            detail["resume"] = row["filename"] if row else ""
             self._db.execute(
-                "INSERT OR REPLACE INTO scores (job_id, resume_id, status, score, detail, created_at)"
+                "INSERT INTO scores (job_id, resume_id, status, score, detail, created_at)"
                 " VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     job_id, resume_id, "done" if score is not None else "failed", score,
-                    json.dumps(detail if detail is not None else {"error": error}), time.time(),
+                    json.dumps(detail), time.time(),
                 ),
             )
             self._bump()

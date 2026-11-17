@@ -416,19 +416,32 @@ def test_jobs_appear_first_and_are_scored_once(scored):
     assert len(service.scorer.calls) == 2
 
 
-def test_new_resume_rescores_everything(scored):
+def test_a_graded_job_is_never_graded_again(scored):
     clock, fake, store, service = scored
     fake.add("1", "Product Manager", age_seconds=600)
     store.save_resume("old.pdf", "old resume")
     service.run_cycle()
     service.score_pending()
-    details_fetched = sum("job_id" in call for call in fake.calls)
+    # A new resume, the same resume again, or removing it: no job is regraded.
     store.save_resume("new.pdf", "new resume")
-    assert store.jobs(["match"])[0]["score_status"] is None
+    store.save_resume("new.pdf", "new resume")
     service.score_pending()
-    assert [call[0] for call in service.scorer.calls] == ["old resume", "new resume"]
-    # The job description was kept, so LinkedIn is not asked for it again.
-    assert sum("job_id" in call for call in fake.calls) == details_fetched
+    assert [call[0] for call in service.scorer.calls] == ["old resume"]
+    job = store.jobs(["match"])[0]
+    assert job["score"] == 80 and '"resume": "old.pdf"' in job["score_detail"]
+    store.remove_resume()
+    assert store.jobs(["match"])[0]["score"] == 80
+    # Only jobs never graded use the new resume.
+    store.save_resume("new.pdf", "new resume")
+    fake.add("2", "Group Product Manager", age_seconds=60)
+    clock.now += 900
+    service.run_cycle()
+    service.score_pending()
+    assert [call[:2] for call in service.scorer.calls] == [("old resume", "1"), ("new resume", "2")]
+    assert service.status()["resume"]["done"] == 2
+    # Even a direct second save is ignored.
+    store.save_score("1", 1, 5, {"summary": "x"})
+    assert store.jobs(["match"])[1]["score"] == 80
 
 
 def test_no_scoring_without_resume_or_key(scored):
@@ -474,6 +487,7 @@ def test_resume_api(scored):
         assert api.get("/api/status").json()["resume"]["done"] == 1
         api.delete("/api/resume")
         assert api.get("/api/status").json()["resume"] is None
+        assert api.get("/api/jobs").json()["jobs"][0]["overlap"]["score"] == 80  # grade kept
 
 
 # ---- scheduling -----------------------------------------------------------
@@ -539,6 +553,7 @@ def test_logos_are_backfilled_without_a_resume(scored):
     service.run_cycle()
     detail_with_logo = DETAIL + '<img class="artdeco-entity-image" data-delayed-url="https://media.licdn.com/l.png">'
     service.client._fetch = lambda params: (200, detail_with_logo)
+    service._score_wake.clear()  # nothing waiting to be graded
     assert service.fetch_missing_details() is False
     rows = {job["id"]: job for job in store.jobs(["match", "no"])}
     assert rows["1"]["logo_url"] == "https://media.licdn.com/l.png"
@@ -626,3 +641,62 @@ def test_auto_prefers_a_key_then_the_subscription(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY")
     monkeypatch.setattr(scoring, "find_claude", lambda: None)
     assert not auto.available()
+
+
+
+def test_upload_grades_only_the_latest_50_and_the_button_grades_one(scored, monkeypatch):
+    clock, fake, store, service = scored
+    for i in range(60):
+        fake.add(f"j{i:02}", "Product Manager", age_seconds=60 * (i + 1))  # j00 is newest
+    service.run_cycle()
+    store.save_resume("cv.pdf", "resume text")
+    while service.score_pending():
+        pass
+    graded = {call[1] for call in service.scorer.calls}
+    assert len(graded) == 50 and "j00" in graded and "j59" not in graded
+    jobs = {job["id"]: job for job in store.jobs(["match"])}
+    assert jobs["j59"]["score_status"] is None and not jobs["j59"]["queued"]
+    # The Grade button: graded with the uploaded resume, once.
+    assert service.grade_now("j59") is None
+    service.score_pending()
+    assert service.scorer.calls[-1][:2] == ("resume text", "j59")
+    assert service.grade_now("j59") == "This job has already been graded."
+    # A job found after the upload is graded automatically.
+    fake.add("fresh", "Product Manager", age_seconds=30)
+    clock.now += 900
+    service.run_cycle()
+    service.score_pending()
+    assert service.scorer.calls[-1][1] == "fresh"
+    assert service.status()["resume"] == {**service.status()["resume"], "done": 52, "pending": 0}
+
+
+def test_clicked_jobs_go_first(scored):
+    clock, fake, store, service = scored
+    for i in range(55):
+        fake.add(f"j{i:02}", "Product Manager", age_seconds=60 * (i + 1))
+    service.run_cycle()
+    store.save_resume("cv.pdf", "resume text")
+    service.grade_now("j54")
+    service.score_pending(limit=1)
+    assert service.scorer.calls[0][1] == "j54"
+
+
+def test_grade_button_needs_a_resume(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=60)
+    service.run_cycle()
+    with TestClient(create_app(service, store, run_scheduler=False)) as api:
+        response = api.post("/api/jobs/1/grade")
+        assert response.status_code == 400 and "resume" in response.json()["error"]
+        store.save_resume("cv.pdf", "resume text")
+        assert api.get("/api/jobs").json()["jobs"][0]["queued"] is True
+
+
+
+def test_grading_interrupts_logo_fetching(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=60)
+    service.run_cycle()
+    service._score_wake.set()  # e.g. a Grade button was just clicked
+    assert service.fetch_missing_details() is True
+    assert store.missing_details() != []  # nothing fetched; grading goes first
