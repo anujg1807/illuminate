@@ -11,7 +11,12 @@ then how transferable your domain is, then context and formal requirements.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -153,7 +158,26 @@ def has_api_key() -> bool:
     return bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
 
 
+def dimensions_text() -> str:
+    return "\n".join(
+        f"- {name} ({label}, weight {weight}): {what}"
+        for name, (weight, label, what) in DIMENSIONS.items()
+    )
+
+
+def posting_text(job: dict) -> str:
+    criteria = "\n".join(f"{key}: {value}" for key, value in (job.get("criteria") or {}).items())
+    return (
+        f"Title: {job['title']}\nCompany: {job['company']}\nLocation: {job['location']}\n"
+        f"{criteria}\n\nDescription:\n{job['description']}"
+    )
+
+
 class Scorer:
+    """Scores through the Anthropic API, billed to an API key."""
+
+    name = "API key"
+
     def __init__(self, model: str = "claude-opus-5-5") -> None:
         self.model = model
         self._client = None
@@ -170,15 +194,8 @@ class Scorer:
 
         if self._client is None:
             self._client = anthropic.Anthropic()
-        dimensions = "\n".join(
-            f"- {name} ({label}, weight {weight}): {what}"
-            for name, (weight, label, what) in DIMENSIONS.items()
-        )
-        criteria = "\n".join(f"{key}: {value}" for key, value in (job.get("criteria") or {}).items())
-        posting = (
-            f"Title: {job['title']}\nCompany: {job['company']}\nLocation: {job['location']}\n"
-            f"{criteria}\n\nDescription:\n{job['description']}"
-        )
+        dimensions = dimensions_text()
+        posting = posting_text(job)
         try:
             response = self._client.messages.parse(
                 model=self.model,
@@ -229,3 +246,127 @@ def check_api_key(key: str) -> None:
         raise ScoringUnavailable("That key does not have permission to use the API.") from error
     except anthropic.APIConnectionError as error:
         raise ScoringUnavailable("Could not reach Anthropic to check the key. Check your internet connection.") from error
+
+
+
+# ---- scoring through Claude Code, on the user's Claude subscription ---------
+
+CLAUDE_TIMEOUT_SECONDS = 300
+# Where the Claude Code installer puts the command, in case it is not on PATH.
+_CLAUDE_LOCATIONS = ("~/.local/bin/claude", "~/.claude/local/claude", "/opt/homebrew/bin/claude", "/usr/local/bin/claude")
+
+
+def find_claude() -> str | None:
+    found = shutil.which("claude")
+    if found:
+        return found
+    for place in _CLAUDE_LOCATIONS:
+        path = Path(place).expanduser()
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
+
+
+class ClaudeCodeScorer:
+    """Scores by running Claude Code in non-interactive mode on this computer.
+
+    Claude Code uses whatever Claude account it is signed in to, so no API key
+    is involved: each assessment counts towards that plan's usage limits.
+    """
+
+    name = "Claude subscription"
+
+    def __init__(self, model: str = "claude-opus-5-5", run=subprocess.run) -> None:
+        self.model = model
+        self._run = run
+
+    def reset(self) -> None:
+        pass
+
+    def available(self) -> bool:
+        return find_claude() is not None
+
+    def assess(self, resume_text: str, job: dict) -> Assessment:
+        claude = find_claude()
+        if claude is None:
+            raise ScoringUnavailable("Claude Code is not installed on this computer (see the README).")
+        system = (
+            SYSTEM.format(dimensions=dimensions_text())
+            + f"\n\n<resume>\n{resume_text}\n</resume>"
+        )
+        prompt = f"<job_posting>\n{posting_text(job)}\n</job_posting>\n\nAssess the match."
+        command = [
+            claude, "-p",
+            "--output-format", "json",
+            "--json-schema", json.dumps(Assessment.model_json_schema()),
+            "--system-prompt", system,
+            "--model", self.model,
+            "--tools", "",                 # no file, shell or web access: it only reads the text given
+            "--strict-mcp-config",         # and no connectors
+            "--no-session-persistence",    # nothing added to your Claude Code history
+        ]
+        # Without an API key in its environment, Claude Code uses the signed-in
+        # subscription; this keeps an API key, if one is set, from being billed.
+        env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
+        with tempfile.TemporaryDirectory() as empty:  # so no project files or settings are picked up
+            try:
+                done = self._run(
+                    command, input=prompt, capture_output=True, text=True,
+                    timeout=CLAUDE_TIMEOUT_SECONDS, cwd=empty, env=env,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise ScoringUnavailable("Claude Code took too long to answer; scoring will retry.") from error
+        try:
+            reply = json.loads(done.stdout)
+        except json.JSONDecodeError:
+            reply = {"is_error": True, "result": (done.stderr or done.stdout).strip()}
+        if done.returncode != 0 or reply.get("is_error"):
+            raise _claude_problem(str(reply.get("result") or done.stderr or "unknown error"))
+        output = reply.get("structured_output")
+        if output is None:
+            raise ValueError("Claude Code returned no assessment for this job")
+        return Assessment.model_validate(output)
+
+
+def _claude_problem(message: str) -> Exception:
+    text = message.lower()
+    if "limit" in text or "usage" in text and "reset" in text:
+        return ScoringUnavailable(
+            "Your Claude usage limit has been reached; Resume Overlap continues when it resets."
+        )
+    if "log in" in text or "login" in text or "not logged" in text or "authenticat" in text or "/login" in text:
+        return ScoringUnavailable(
+            "Claude Code is not signed in. Open Terminal, run claude, and sign in with your Claude account."
+        )
+    if "overloaded" in text or "network" in text or "connect" in text:
+        return ScoringUnavailable("Claude is unavailable right now; scoring will retry.")
+    return ValueError(f"Claude Code failed: {message[:300]}")
+
+
+class AutoScorer:
+    """Uses the API key if one is saved, otherwise the Claude subscription via Claude Code."""
+
+    def __init__(self, model: str = "claude-opus-5-5", method: str = "auto") -> None:
+        self.method = method
+        self.api = Scorer(model)
+        self.subscription = ClaudeCodeScorer(model)
+
+    def _pick(self):
+        if self.method == "api":
+            return self.api
+        if self.method == "claude-code":
+            return self.subscription
+        return self.api if self.api.available() else self.subscription
+
+    @property
+    def name(self) -> str:
+        return self._pick().name
+
+    def reset(self) -> None:
+        self.api.reset()
+
+    def available(self) -> bool:
+        return self._pick().available()
+
+    def assess(self, resume_text: str, job: dict) -> Assessment:
+        return self._pick().assess(resume_text, job)

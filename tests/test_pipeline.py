@@ -566,3 +566,63 @@ def test_api_key_can_be_saved_from_the_page(scored, tmp_path, monkeypatch):
     assert oct(env.stat().st_mode & 0o777) == "0o600"
     import os
     assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-good"
+
+
+
+# ---- scoring through Claude Code -----------------------------------------
+
+import json as _json
+import subprocess as _subprocess
+
+
+def _reply(stdout, returncode=0):
+    return _subprocess.CompletedProcess([], returncode, stdout=stdout, stderr="")
+
+
+def _job():
+    return {"id": "1", "title": "Product Manager", "company": "Acme", "location": "Pune",
+            "description": "Own the roadmap.", "criteria": {"Seniority level": "Mid-Senior level"}}
+
+
+def test_claude_code_scorer_uses_the_subscription(monkeypatch):
+    monkeypatch.setattr(scoring, "find_claude", lambda: "/usr/local/bin/claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-should-not-be-used")
+    seen = {}
+
+    def run(command, **kwargs):
+        seen.update(command=command, **kwargs)
+        return _reply(_json.dumps({"type": "result", "is_error": False,
+                                   "structured_output": assessment(70).model_dump()}))
+
+    result = scoring.ClaudeCodeScorer("claude-opus-5-5", run=run).assess("my resume", _job())
+    assert scoring.overall(result) == 70
+    command = seen["command"]
+    assert command[:2] == ["/usr/local/bin/claude", "-p"]
+    assert command[command.index("--tools") + 1] == ""
+    assert "my resume" in command[command.index("--system-prompt") + 1]
+    assert "Own the roadmap." in seen["input"]
+    assert "ANTHROPIC_API_KEY" not in seen["env"]  # never billed to a key
+
+
+@pytest.mark.parametrize("message,expected", [
+    ("Claude AI usage limit reached|1794800000", "usage limit"),
+    ("Invalid API key · Please run /login", "not signed in"),
+])
+def test_claude_code_problems_pause_scoring(monkeypatch, message, expected):
+    monkeypatch.setattr(scoring, "find_claude", lambda: "claude")
+    run = lambda command, **kwargs: _reply(_json.dumps({"is_error": True, "result": message}), 1)
+    with pytest.raises(scoring.ScoringUnavailable, match=expected):
+        scoring.ClaudeCodeScorer(run=run).assess("resume", _job())
+
+
+def test_auto_prefers_a_key_then_the_subscription(monkeypatch):
+    monkeypatch.setattr(scoring, "find_claude", lambda: "claude")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    auto = scoring.AutoScorer()
+    assert auto.available() and auto.name == "Claude subscription"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
+    assert auto.name == "API key"
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setattr(scoring, "find_claude", lambda: None)
+    assert not auto.available()

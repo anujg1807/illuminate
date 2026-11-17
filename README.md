@@ -52,15 +52,33 @@ matches your resume. Click a percentage to see the breakdown. Your resume is
 stored only in `data/illuminate.db` on this computer; its text is sent to
 Anthropic's API for scoring, and nowhere else.
 
-Scoring uses Claude, so it needs an Anthropic API key (this is separate from a
-Claude subscription and is billed per use):
+Scoring uses Claude. It works with either of these:
 
-1. Create a key at https://console.anthropic.com/settings/keys and add credit.
-2. After uploading your resume, paste the key into the box that appears under
-   it and click **Save key**. Illuminate checks the key with Anthropic and saves
-   it in a file named `.env` in this folder. Git ignores that file, so the key
-   is never pushed. (You can also create `.env` yourself with the line
-   `ANTHROPIC_API_KEY=sk-ant-...` and restart.)
+**Your Claude subscription (no API key).** Illuminate runs Claude Code, the
+command-line version of Claude, on this computer, signed in to your Claude
+account. Each job scored counts towards your plan's usage limits, like a chat;
+if you reach the limit, scoring pauses and carries on when it resets. Set up
+once:
+
+1. Install Claude Code:
+
+   ```
+   curl -fsSL https://claude.ai/install.sh | bash
+   ```
+
+2. Run `claude` in Terminal, sign in with your Claude account, then type
+   `/exit`.
+
+Illuminate finds it by itself; scoring starts within five minutes, or straight
+away if you restart the app. Claude Code is run with no file, web or shell
+access: it only reads the resume and job text it is given.
+
+**An Anthropic API key (billed per use).** Create a key at
+https://console.anthropic.com/settings/keys and add credit, then paste it into
+the box under your resume and click **Save key**. It is checked and saved in a
+file named `.env` in this folder, which git ignores. When a key is saved it is
+used instead of the subscription; `method` under `[scoring]` in `config.toml`
+can force one or the other.
 
 How it works:
 
@@ -75,9 +93,9 @@ How it works:
   Anything the posting does not mention is left out rather than counted as
   zero. If the posting states a hard requirement your resume clearly fails,
   the percentage is capped at 55.
-- The model is set in `config.toml` under `[scoring]`. The default,
-  `claude-opus-5-5`, costs roughly 3 to 5 US cents per job; the file lists
-  cheaper options.
+- The model is set in `config.toml` under `[scoring]`. With an API key the
+  default, `claude-opus-5-5`, costs roughly 3 to 5 US cents per job; the file
+  lists cheaper options. Each job takes about 15 to 30 seconds.
 
 ## Settings
 

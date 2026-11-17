@@ -46,7 +46,7 @@ class Service:
             stop=self._stop,
         )
         self._thread: threading.Thread | None = None
-        self.scorer = scorer or scoring.Scorer(config.scoring_model)
+        self.scorer = scorer or scoring.AutoScorer(config.scoring_model, config.scoring_method)
         self._score_wake = threading.Event()
         self._score_thread: threading.Thread | None = None
         self.scoring_note = ""  # why scoring is paused, if it is
@@ -304,7 +304,10 @@ class Service:
             self.scoring_note = ""
             return False
         if not self.scorer.available():
-            self.scoring_note = "Add your Anthropic API key below to turn on Resume Overlap."
+            self.scoring_note = (
+                "Install Claude Code and sign in with your Claude account to turn on "
+                "Resume Overlap (see the README), or paste an API key below."
+            )
             return False
         jobs = self.store.unscored(resume["id"], limit)
         for job in jobs:
@@ -374,6 +377,7 @@ class Service:
             "filename": resume["filename"],
             "uploaded_at": resume["uploaded_at"],
             "note": self.scoring_note,
-            "has_key": self.scorer.available(),
+            "has_key": self.scorer.available(),  # scoring can run (subscription or key)
+            "method": getattr(self.scorer, "name", ""),
             **self.store.score_counts(),
         }

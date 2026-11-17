@@ -34,6 +34,12 @@ max_delay_seconds = 6
 refine_requests_per_cycle = 30
 
 [scoring]
+# How Resume Overlap reaches Claude:
+#   "auto"        - an API key if one is saved, otherwise your Claude subscription
+#   "claude-code" - always your Claude subscription, through Claude Code on this computer
+#   "api"         - always an Anthropic API key
+method = "auto"
+
 # The Claude model that rates how well your resume matches each job.
 # "claude-opus-5-5" judges best. "claude-sonnet-5-5" costs about half as much
 # and "claude-haiku-5-5" a small fraction, with less careful judgement.

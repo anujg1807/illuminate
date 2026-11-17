@@ -270,7 +270,7 @@ function overlapCell(job) {
   } else if (job.label === "no") {
     cell.append(el("span", { title: "Only product roles are scored" }, "–"));
   } else if (!o && !resume.has_key) {
-    cell.append(el("span", { class: "approx", title: "Add your Anthropic API key above to turn on Resume Overlap" }, "Needs API key"));
+    cell.append(el("span", { class: "approx", title: "Set up Claude Code or an API key to turn on Resume Overlap" }, "Needs setup"));
   } else if (!o) {
     cell.append(resume.note
       ? el("span", { class: "approx", title: resume.note }, "Paused")
@@ -328,7 +328,8 @@ function renderResume() {
   });
   let progress = r.pending ? `${r.done} of ${r.done + r.pending} jobs scored` : `all ${r.done} jobs scored`;
   if (r.note) progress = r.note;
-  if (!r.has_key) progress = "Add your Anthropic API key below to turn on Resume Overlap.";
+  if (!r.has_key) progress = "Install Claude Code and sign in to turn on Resume Overlap (see the README), then restart Illuminate. Or paste an API key below.";
+  else if (r.method && !r.note) progress += ` · using your ${r.method}`;
   box.replaceChildren("Resume: ", el("b", {}, r.filename), " · ",
     r.note || !r.has_key ? el("span", { class: "warn-text" }, progress) : progress, " · ", remove);
   if (!r.has_key) box.append(keyForm());
