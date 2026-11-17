@@ -73,6 +73,10 @@
   .resume { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 14px;
     font-size: 14px; color: var(--muted); }
   .resume b { color: var(--text); font-weight: 600; }
+  .keyform { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 4px; }
+  .keyform input { font: inherit; flex: 1 1 280px; max-width: 420px; padding: 7px 12px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+  .keyform a { color: var(--link); }
   .linkish { border: 0; background: none; padding: 0; color: var(--link); text-decoration: underline; }
   .company { display: flex; align-items: center; gap: 12px; }
   .logo { width: 56px; height: 56px; flex: none; border-radius: 10px; background: #fff;
@@ -239,12 +243,22 @@ function whenCell(job) {
   return cell;
 }
 
+// Logo elements are kept and moved into each redrawn row instead of being
+// created afresh, so a logo that has loaded never blinks out or reloads.
+const logos = new Map();
 function logo(job) {
+  const key = job.id + " " + (job.logo_url || "");  // one element per row
+  if (logos.has(key)) return logos.get(key);
   const blank = () => el("div", { class: "logo blank" }, (job.company.trim()[0] || "?").toUpperCase());
-  if (!job.logo_url) return blank();
-  const img = el("img", { class: "logo", src: job.logo_url, alt: "", loading: "lazy", referrerpolicy: "no-referrer" });
-  img.addEventListener("error", () => img.replaceWith(blank()));
-  return img;
+  let node = blank();
+  if (job.logo_url) {
+    node = el("img", { class: "logo", src: job.logo_url, alt: "", referrerpolicy: "no-referrer" });
+    node.addEventListener("error", () => {
+      const fallback = blank(); node.replaceWith(fallback); logos.set(key, fallback);
+    });
+  }
+  logos.set(key, node);
+  return node;
 }
 
 function overlapCell(job) {
@@ -255,6 +269,8 @@ function overlapCell(job) {
     cell.append(el("span", { class: "approx", title: "Upload a resume to see this" }, "–"));
   } else if (job.label === "no") {
     cell.append(el("span", { title: "Only product roles are scored" }, "–"));
+  } else if (!o && !resume.has_key) {
+    cell.append(el("span", { class: "approx", title: "Add your Anthropic API key above to turn on Resume Overlap" }, "Needs API key"));
   } else if (!o) {
     cell.append(resume.note
       ? el("span", { class: "approx", title: resume.note }, "Paused")
@@ -312,8 +328,34 @@ function renderResume() {
   });
   let progress = r.pending ? `${r.done} of ${r.done + r.pending} jobs scored` : `all ${r.done} jobs scored`;
   if (r.note) progress = r.note;
+  if (!r.has_key) progress = "Add your Anthropic API key below to turn on Resume Overlap.";
   box.replaceChildren("Resume: ", el("b", {}, r.filename), " · ",
-    r.note ? el("span", { class: "warn-text" }, progress) : progress, " · ", remove);
+    r.note || !r.has_key ? el("span", { class: "warn-text" }, progress) : progress, " · ", remove);
+  if (!r.has_key) box.append(keyForm());
+}
+
+let keyFormNode = null;
+function keyForm() {
+  // Kept between redraws so typing is not lost when the page refreshes its status.
+  if (keyFormNode) return keyFormNode;
+  const input = el("input", { type: "password", id: "key", autocomplete: "off",
+    placeholder: "Paste your Anthropic API key (sk-ant-…)" });
+  const save = el("button", { class: "primary" }, "Save key");
+  const help = el("a", { href: "https://console.anthropic.com/settings/keys", target: "_blank", rel: "noopener" }, "Get a key");
+  const message = el("span", { class: "warn-text" }, "");
+  save.addEventListener("click", async () => {
+    save.disabled = true; save.textContent = "Checking…"; message.textContent = "";
+    try {
+      const response = await fetch("/api/key", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: input.value }) });
+      const body = await response.json();
+      if (response.ok) { keyFormNode = null; await poll(); return; }
+      message.textContent = body.error || "The key could not be saved.";
+    } catch { message.textContent = "Could not reach Illuminate."; }
+    save.disabled = false; save.textContent = "Save key";
+  });
+  keyFormNode = el("div", { class: "keyform" }, input, save, help, message);
+  return keyFormNode;
 }
 
 async function uploadResume(file) {

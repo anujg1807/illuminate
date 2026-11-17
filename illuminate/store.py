@@ -87,6 +87,10 @@ class Store:
             ):
                 if column not in have:
                     self._db.execute(f"ALTER TABLE jobs ADD COLUMN {column} {kind}")
+            # Placeholder images saved by an earlier version are not logos.
+            self._db.execute(
+                "UPDATE jobs SET logo_url = NULL WHERE logo_url NOT LIKE 'https://media.licdn.com/%'"
+            )
             # A run left "running" means the app was closed mid-run.
             self._db.execute(
                 "UPDATE runs SET status = 'partial', note = 'interrupted',"
@@ -242,6 +246,16 @@ class Store:
             self._db.execute("DELETE FROM scores")
             self._db.execute("DELETE FROM resumes")
             self._bump()
+
+    def missing_details(self, limit: int = 10) -> list[dict]:
+        """Product roles whose full posting (and logo) has not been fetched yet, newest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM jobs WHERE label IN ('match', 'maybe') AND description IS NULL"
+                " AND detail_failed = 0 ORDER BY posted_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def unscored(self, resume_id: int, limit: int = 20) -> list[dict]:
         """Relevant jobs with no score yet for this resume, newest first."""

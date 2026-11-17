@@ -80,6 +80,17 @@ class SearchResult:
     note: str = ""
 
 
+def logo_of(node) -> str | None:
+    """The company logo's address, or None when LinkedIn shows only its grey placeholder."""
+    image = node.find("img", class_="artdeco-entity-image")
+    if image is None:
+        return None
+    url = image.get("data-delayed-url") or image.get("src")
+    if not url or "media.licdn.com" not in str(url):
+        return None
+    return str(url)
+
+
 def parse_cards(html: str, seen_at: float) -> list[Card]:
     soup = BeautifulSoup(html, "html.parser")
     cards: list[Card] = []
@@ -92,8 +103,7 @@ def parse_cards(html: str, seen_at: float) -> list[Card]:
         company_link = company.find("a", href=True) if company else None
         location = node.find(class_="job-search-card__location")
         posted = node.find("time")
-        logo = node.find("img", class_="artdeco-entity-image")
-        logo_url = (logo.get("data-delayed-url") or logo.get("src")) if logo else None
+        logo_url = logo_of(node)
         cards.append(
             Card(
                 id=job_id,
@@ -136,8 +146,7 @@ def parse_detail(html: str) -> JobDetail | None:
         value = item.find(class_="description__job-criteria-text")
         if name and value:
             criteria[name.get_text(strip=True)] = value.get_text(strip=True)
-    logo = soup.find("img", class_="artdeco-entity-image")
-    logo_url = (logo.get("data-delayed-url") or logo.get("src")) if logo else None
+    logo_url = logo_of(soup)
     if not description:
         return None
     return JobDetail(description, criteria, str(logo_url) if logo_url else None)

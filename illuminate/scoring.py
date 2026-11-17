@@ -158,6 +158,10 @@ class Scorer:
         self.model = model
         self._client = None
 
+    def reset(self) -> None:
+        """Forget the client, so a newly saved API key is used."""
+        self._client = None
+
     def available(self) -> bool:
         return has_api_key()
 
@@ -211,3 +215,17 @@ class Scorer:
 
 
 Status = Literal["none", "pending", "done", "failed"]
+
+
+def check_api_key(key: str) -> None:
+    """Raise ScoringUnavailable if Anthropic does not accept this key (the check is free)."""
+    import anthropic
+
+    try:
+        anthropic.Anthropic(api_key=key).models.list(limit=1)
+    except anthropic.AuthenticationError as error:
+        raise ScoringUnavailable("Anthropic did not accept that key. Copy it again from the Console.") from error
+    except anthropic.PermissionDeniedError as error:
+        raise ScoringUnavailable("That key does not have permission to use the API.") from error
+    except anthropic.APIConnectionError as error:
+        raise ScoringUnavailable("Could not reach Anthropic to check the key. Check your internet connection.") from error

@@ -269,6 +269,9 @@ class Service:
             self._score_wake.clear()
             try:
                 more = self.score_pending()
+                # Then fetch the full posting of other product roles, so every
+                # row gets its company logo and later scores start sooner.
+                more = self.fetch_missing_details() or more
             except Exception:
                 log.exception("scoring failed")
                 more = False
@@ -277,6 +280,23 @@ class Service:
                 # (which also retries after a paused state such as a rate limit).
                 self._score_wake.wait(300)
 
+    def fetch_missing_details(self, limit: int = 10) -> bool:
+        """Fetch postings not fetched yet. Returns True if more may remain."""
+        jobs = self.store.missing_details(limit)
+        for job in jobs:
+            if self._stop.is_set():
+                return False
+            try:
+                detail = self.client.job_detail(job["id"])
+            except LinkedInError:  # rate limited or stopping: try again later
+                return False
+            self.store.save_detail(
+                job["id"], detail.description if detail else None,
+                detail.criteria if detail else None, detail.logo_url if detail else None,
+            )
+            self.store._bump()
+        return len(jobs) == limit
+
     def score_pending(self, limit: int = 20) -> bool:
         """Score jobs that have no overlap yet. Returns True if more may remain."""
         resume = self.store.resume()
@@ -284,7 +304,7 @@ class Service:
             self.scoring_note = ""
             return False
         if not self.scorer.available():
-            self.scoring_note = "Add your Anthropic API key to turn on Resume Overlap (see the README)."
+            self.scoring_note = "Add your Anthropic API key below to turn on Resume Overlap."
             return False
         jobs = self.store.unscored(resume["id"], limit)
         for job in jobs:

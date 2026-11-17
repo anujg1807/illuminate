@@ -338,6 +338,9 @@ class FakeScorer:
     def available(self):
         return self.key
 
+    def reset(self):
+        pass
+
     def assess(self, resume_text, job):
         self.calls.append((resume_text, job["id"], job["description"]))
         return assessment(60 if "Owner" in job["title"] else 80)
@@ -379,9 +382,9 @@ def test_parse_detail():
 def test_logo_is_read_from_the_card():
     html = card_html("1", "Product Manager").replace(
         '<div class="base-search-card__info">',
-        '<img class="artdeco-entity-image" data-delayed-url="https://media.example/logo.png">'
+        '<img class="artdeco-entity-image" data-delayed-url="https://media.licdn.com/logo.png">'
         '<div class="base-search-card__info">')
-    assert parse_cards(html, 1.0)[0].logo_url == "https://media.example/logo.png"
+    assert parse_cards(html, 1.0)[0].logo_url == "https://media.licdn.com/logo.png"
 
 
 def test_resume_text_extraction():
@@ -519,3 +522,47 @@ def test_interrupted_check_gets_a_time(tmp_path):
     store.close()
     last = Store(path).last_run()
     assert last["status"] == "partial" and last["finished_at"] == 1000.0
+
+
+def test_logo_placeholder_is_ignored():
+    html = card_html("1", "Product Manager").replace(
+        '<div class="base-search-card__info">',
+        '<img class="artdeco-entity-image" src="https://static.licdn.com/aero-v1/sc/h/ghost">'
+        '<div class="base-search-card__info">')
+    assert parse_cards(html, 1.0)[0].logo_url is None
+
+
+def test_logos_are_backfilled_without_a_resume(scored):
+    clock, fake, store, service = scored
+    fake.add("1", "Product Manager", age_seconds=600)
+    fake.add("3", "Project Manager", age_seconds=600)
+    service.run_cycle()
+    detail_with_logo = DETAIL + '<img class="artdeco-entity-image" data-delayed-url="https://media.licdn.com/l.png">'
+    service.client._fetch = lambda params: (200, detail_with_logo)
+    assert service.fetch_missing_details() is False
+    rows = {job["id"]: job for job in store.jobs(["match", "no"])}
+    assert rows["1"]["logo_url"] == "https://media.licdn.com/l.png"
+    assert rows["3"]["logo_url"] is None  # other roles are not fetched
+    assert store.missing_details() == []
+
+
+def test_api_key_can_be_saved_from_the_page(scored, tmp_path, monkeypatch):
+    clock, fake, store, service = scored
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    env = tmp_path / ".env"
+    env.write_text("OTHER=1\nANTHROPIC_API_KEY=old\n")
+
+    def check(key):
+        if key.endswith("bad"):
+            raise scoring.ScoringUnavailable("Anthropic did not accept that key.")
+
+    app = create_app(service, store, run_scheduler=False, env_path=env, check_key=check)
+    with TestClient(app) as api:
+        assert api.post("/api/key", json={"key": "hello"}).status_code == 400
+        rejected = api.post("/api/key", json={"key": "sk-ant-bad"})
+        assert rejected.status_code == 400 and "did not accept" in rejected.json()["error"]
+        assert api.post("/api/key", json={"key": "sk-ant-good"}).json() == {"saved": True}
+    assert env.read_text() == "OTHER=1\nANTHROPIC_API_KEY=sk-ant-good\n"
+    assert oct(env.stat().st_mode & 0o777) == "0o600"
+    import os
+    assert os.environ["ANTHROPIC_API_KEY"] == "sk-ant-good"

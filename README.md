@@ -56,13 +56,11 @@ Scoring uses Claude, so it needs an Anthropic API key (this is separate from a
 Claude subscription and is billed per use):
 
 1. Create a key at https://console.anthropic.com/settings/keys and add credit.
-2. In this folder, create a file named `.env` containing one line:
-
-   ```
-   ANTHROPIC_API_KEY=sk-ant-...
-   ```
-
-3. Restart the app. The `.env` file is ignored by git, so the key is never pushed.
+2. After uploading your resume, paste the key into the box that appears under
+   it and click **Save key**. Illuminate checks the key with Anthropic and saves
+   it in a file named `.env` in this folder. Git ignores that file, so the key
+   is never pushed. (You can also create `.env` yourself with the line
+   `ANTHROPIC_API_KEY=sk-ant-...` and restart.)
 
 How it works:
 

@@ -44,7 +44,7 @@ def main() -> None:
     store = Store(config.database)
     store.reclassify(classify)
     service = Service(config, store)
-    app = create_app(service, store)
+    app = create_app(service, store, env_path=Path(args.config).parent / ".env")
 
     url = f"http://localhost:{port}"
     logging.getLogger("illuminate").info("Illuminate is running at %s  (Ctrl+C to stop)", url)
